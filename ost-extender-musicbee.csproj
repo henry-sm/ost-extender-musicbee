@@ -20,6 +20,7 @@
   <ItemGroup>
     <PackageReference Include="Accord" Version="3.8.0" />
     <PackageReference Include="Accord.Audio" Version="3.8.0" />
+    <PackageReference Include="Accord.Math" Version="3.8.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 

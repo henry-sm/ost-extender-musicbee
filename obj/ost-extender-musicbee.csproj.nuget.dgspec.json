@@ -52,6 +52,10 @@
               "target": "Package",
               "version": "[3.8.0, )"
             },
+            "Accord.Math": {
+              "target": "Package",
+              "version": "[3.8.0, )"
+            },
             "NAudio": {
               "target": "Package",
               "version": "[2.2.1, )"

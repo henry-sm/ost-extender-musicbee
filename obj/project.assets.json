@@ -639,6 +639,7 @@
     ".NETFramework,Version=v4.8": [
       "Accord >= 3.8.0",
       "Accord.Audio >= 3.8.0",
+      "Accord.Math >= 3.8.0",
       "NAudio >= 2.2.1"
     ]
   },
@@ -690,6 +691,10 @@
             "version": "[3.8.0, )"
           },
           "Accord.Audio": {
+            "target": "Package",
+            "version": "[3.8.0, )"
+          },
+          "Accord.Math": {
             "target": "Package",
             "version": "[3.8.0, )"
           },
