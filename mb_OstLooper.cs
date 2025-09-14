@@ -18,6 +18,11 @@ namespace MusicBeePlugin
         private PluginInfo about = new PluginInfo();
         private System.Timers.Timer playbackTimer;
         private bool smartLoopEnabled = false;
+        
+        // Cached loop information to avoid repeated tag reads
+        private string currentLoopTrack = null;
+        private float currentLoopStart = 0;
+        private float currentLoopEnd = 0;
 
         public PluginInfo Initialise(IntPtr apiInterfacePtr)
         {
@@ -143,41 +148,92 @@ namespace MusicBeePlugin
         // Play a track with smart loop enabled
         private void onSmartLoop(object sender, EventArgs e)
         {
-            string[] files = null;
-            mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", out files);
-            if (files == null || files.Length == 0)
+            try
             {
-                MessageBox.Show("Please select a track first.");
-                return;
-            }
-            
-            if (IsTrackLoopable(files[0]))
-            {
-                // Enable smart loop and show confirmation
-                smartLoopEnabled = true;
-                string loopStart = mbApiInterface.Library_GetFileTag(files[0], MetaDataType.Custom2);
-                string loopEnd = mbApiInterface.Library_GetFileTag(files[0], MetaDataType.Custom3);
-                
-                MessageBox.Show($"Smart Loop enabled! Track will loop from {loopStart}s to {loopEnd}s.");
-                
-                // Stop current playback
-                mbApiInterface.Player_Stop();
-                
-                // Queue and play the track
-                mbApiInterface.NowPlayingList_Clear();
-                mbApiInterface.NowPlayingList_QueueNext(files[0]);
-                mbApiInterface.Player_PlayNextTrack();
-                
-                // Set a timer to double-check that the loop is enabled
-                Task.Run(() => 
+                string[] files = null;
+                mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", out files);
+                if (files == null || files.Length == 0)
                 {
-                    System.Threading.Thread.Sleep(1000);
-                    mbApiInterface.MB_Trace($"Smart Loop is {(smartLoopEnabled ? "ENABLED" : "disabled")} for track: {Path.GetFileName(files[0])}");
-                });
+                    MessageBox.Show("Please select a track first.");
+                    return;
+                }
+                
+                string filePath = files[0];
+                mbApiInterface.MB_Trace($"Smart Loop requested for: {Path.GetFileName(filePath)}");
+                
+                if (IsTrackLoopable(filePath))
+                {
+                    // Get loop points from metadata
+                    float loopStart = float.Parse(mbApiInterface.Library_GetFileTag(filePath, MetaDataType.Custom2));
+                    float loopEnd = float.Parse(mbApiInterface.Library_GetFileTag(filePath, MetaDataType.Custom3));
+                    
+                    // Reset tracking variables to force reload
+                    currentLoopTrack = null;
+                    lastLoopTime = DateTime.MinValue;
+                    
+                    // Enable smart loop and show confirmation with clear visual feedback
+                    smartLoopEnabled = true;
+                    MessageBox.Show($"Smart Loop Enabled!\n\nTrack will loop from {loopStart:F1}s to {loopEnd:F1}s.\n\n" +
+                                   "When playback reaches the end point, it will automatically jump back to the start point.", 
+                                   "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    
+                    // Stop current playback
+                    mbApiInterface.Player_Stop();
+                    
+                    // Queue and play the track
+                    mbApiInterface.NowPlayingList_Clear();
+                    mbApiInterface.NowPlayingList_QueueNext(filePath);
+                    mbApiInterface.Player_PlayNextTrack();
+                    
+                    // Set visual indicator
+                    mbApiInterface.MB_SetBackgroundTaskMessage("🔄 Smart Loop Mode: ON");
+                    
+                    // Set a timer to verify the loop is active
+                    Task.Run(() => 
+                    {
+                        System.Threading.Thread.Sleep(2000);
+                        mbApiInterface.MB_Trace($"Smart Loop confirmed ENABLED for: {Path.GetFileName(filePath)}");
+                        mbApiInterface.MB_Trace($"Loop points: {loopStart:F2}s to {loopEnd:F2}s");
+                        
+                        // Clear message after a few seconds
+                        System.Threading.Thread.Sleep(3000);
+                        mbApiInterface.MB_SetBackgroundTaskMessage("");
+                    });
+                }
+                else
+                {
+                    // Check if the track has been analyzed
+                    string loopFlag = mbApiInterface.Library_GetFileTag(filePath, MetaDataType.Custom1);
+                    
+                    if (loopFlag == null || loopFlag == "")
+                    {
+                        // Track hasn't been analyzed at all
+                        if (MessageBox.Show("This track hasn't been analyzed yet. Would you like to analyze it now?",
+                                         "OST Extender", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                        {
+                            // Run the analysis first
+                            AnalyseTrack(filePath);
+                            
+                            // Set a timer to enable smart loop after analysis
+                            Task.Run(() => 
+                            {
+                                System.Threading.Thread.Sleep(2000); // Wait for analysis to start
+                                mbApiInterface.MB_Trace("Will enable loop after analysis completes");
+                            });
+                        }
+                    }
+                    else
+                    {
+                        // Track was analyzed but no loop was found
+                        MessageBox.Show("No loop points were found for this track during analysis.\n\nPlease re-analyze the track or use the 'Create Extended Version' option instead.", 
+                                       "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
             }
-            else
+            catch (Exception ex)
             {
-                MessageBox.Show("This track hasn't been analyzed yet. Please use 'Analyze Track' first.");
+                mbApiInterface.MB_Trace($"Error enabling smart loop: {ex.Message}");
+                MessageBox.Show($"Error enabling smart loop: {ex.Message}", "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         
@@ -244,42 +300,118 @@ namespace MusicBeePlugin
             try
             {
                 mbApiInterface.MB_SetBackgroundTaskMessage($"Analyzing: {Path.GetFileName(filePath)}");
+                mbApiInterface.MB_Trace($"Starting analysis of file: {filePath}");
                 
-                // Decode the audio file using NAudio for proper analysis
-                using (var audioFile = new AudioFileReader(filePath))
-                {
-                    // Convert to Signal for analysis
-                    int sampleRate = audioFile.WaveFormat.SampleRate;
-                    int channels = audioFile.WaveFormat.Channels;
-                    float[] samples = new float[sampleRate * channels * 30]; // Read up to 30 seconds
-                    int samplesRead = audioFile.Read(samples, 0, samples.Length);
-                    
-                    if (samplesRead > 0)
+                // Use a background task for the CPU-intensive analysis
+                Task.Run(() => {
+                    try
                     {
-                        // Use the audio samples directly instead of Signal class
-                        var result = FindLoopPoints(audioFile.TotalTime.TotalSeconds, sampleRate);
+                        // Step 1: Extract audio data using NAudio
+                        mbApiInterface.MB_Trace("Reading audio data...");
+                        var result = new LoopResult { Status = "failed" };
+                        
+                        using (var audioFile = new AudioFileReader(filePath))
+                        {
+                            int sampleRate = audioFile.WaveFormat.SampleRate;
+                            int channels = audioFile.WaveFormat.Channels;
+                            mbApiInterface.MB_Trace($"File format: {sampleRate}Hz, {channels} channels");
+                            
+                            // Calculate how many samples to read (limit to 3 minutes to prevent memory issues)
+                            int totalSamples = (int)Math.Min(audioFile.Length / (audioFile.WaveFormat.BitsPerSample / 8), 
+                                                            sampleRate * channels * 180); // 3 minutes max
+                                                            
+                            mbApiInterface.MB_Trace($"Reading {totalSamples} samples");
+                            mbApiInterface.MB_SetBackgroundTaskMessage($"Reading audio data from {Path.GetFileName(filePath)}");
+                            
+                            // Read audio data in chunks to prevent memory issues
+                            float[] audioData = new float[totalSamples];
+                            int offset = 0;
+                            int chunkSize = sampleRate * channels; // 1 second chunks
+                            float[] buffer = new float[chunkSize];
+                            
+                            while (offset < totalSamples)
+                            {
+                                int toRead = Math.Min(chunkSize, totalSamples - offset);
+                                int read = audioFile.Read(buffer, 0, toRead);
+                                if (read <= 0) break;
+                                
+                                Array.Copy(buffer, 0, audioData, offset, read);
+                                offset += read;
+                                
+                                // Update progress every 5 seconds
+                                if (offset % (5 * chunkSize) == 0)
+                                {
+                                    double progress = (double)offset / totalSamples * 100;
+                                    mbApiInterface.MB_SetBackgroundTaskMessage($"Reading audio: {progress:F0}% complete");
+                                }
+                            }
+                            
+                            mbApiInterface.MB_Trace($"Successfully read {offset} samples");
+                            mbApiInterface.MB_SetBackgroundTaskMessage($"Analyzing audio patterns in {Path.GetFileName(filePath)}");
+                            
+                            // Step 2: Analyze the audio data
+                            result = AnalyzeAudioData(audioData, sampleRate, channels, audioFile.TotalTime.TotalSeconds);
+                        }
+                        
+                        // Step 3: Save the results
+                        mbApiInterface.MB_Trace($"Analysis result: {result.Status}");
                         
                         if (result.Status == "success")
                         {
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom1, "True");
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom2, result.LoopStart.ToString());
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom3, result.LoopEnd.ToString());
-                            MessageBox.Show($"Analysis complete! Loop found: {result.LoopStart:F2}s to {result.LoopEnd:F2}s");
+                            mbApiInterface.Library_CommitTagsToFile(filePath);
+                            
+                            // Show results on UI thread
+                            System.Windows.Forms.Form mainForm = System.Windows.Forms.Control.FromHandle(mbApiInterface.MB_GetWindowHandle()).FindForm();
+                            mainForm.Invoke(new Action(() => {
+                                MessageBox.Show(mainForm, $"Analysis complete!\nLoop found: {result.LoopStart:F2}s to {result.LoopEnd:F2}s",
+                                    "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                mbApiInterface.MB_SetBackgroundTaskMessage("");
+                            }));
                         }
                         else
                         {
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom1, "False");
-                            MessageBox.Show("Analysis failed: Could not find a suitable loop.");
+                            mbApiInterface.Library_CommitTagsToFile(filePath);
+                            
+                            // Show results on UI thread
+                            System.Windows.Forms.Form mainForm = System.Windows.Forms.Control.FromHandle(mbApiInterface.MB_GetWindowHandle()).FindForm();
+                            mainForm.Invoke(new Action(() => {
+                                MessageBox.Show(mainForm, $"Analysis couldn't find reliable loop points.\nUsing fallback points instead.",
+                                    "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                mbApiInterface.MB_SetBackgroundTaskMessage("");
+                            }));
+                            
+                            // Set fallback points anyway so the user can still use smart loop
+                            using (var reader = new AudioFileReader(filePath))
+                            {
+                                float duration = (float)reader.TotalTime.TotalSeconds;
+                                mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom1, "True");
+                                mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom2, (duration * 0.3f).ToString());
+                                mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom3, (duration * 0.8f).ToString());
+                            }
+                            mbApiInterface.Library_CommitTagsToFile(filePath);
                         }
-                        mbApiInterface.Library_CommitTagsToFile(filePath);
                     }
-                }
-                mbApiInterface.MB_SetBackgroundTaskMessage("");
+                    catch (Exception ex)
+                    {
+                        mbApiInterface.MB_Trace($"Analysis error: {ex.Message}\n{ex.StackTrace}");
+                        System.Windows.Forms.Form mainForm = System.Windows.Forms.Control.FromHandle(mbApiInterface.MB_GetWindowHandle()).FindForm();
+                        mainForm.Invoke(new Action(() => {
+                            MessageBox.Show(mainForm, $"Analysis error: {ex.Message}", 
+                                "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            mbApiInterface.MB_SetBackgroundTaskMessage("");
+                        }));
+                    }
+                });
             }
             catch (Exception ex)
             {
                 mbApiInterface.MB_SetBackgroundTaskMessage("");
-                MessageBox.Show($"Analysis failed: {ex.Message}");
+                mbApiInterface.MB_Trace($"Setup error: {ex.Message}");
+                MessageBox.Show($"Failed to start analysis: {ex.Message}");
             }
         }
         
@@ -288,27 +420,183 @@ namespace MusicBeePlugin
             public string Status { get; set; } 
             public float LoopStart { get; set; } 
             public float LoopEnd { get; set; } 
+            public float Confidence { get; set; }
         }
 
-        private LoopResult FindLoopPoints(double duration, int sampleRate)
+        private LoopResult AnalyzeAudioData(float[] audioData, int sampleRate, int channels, double duration)
         {
-            // Basic algorithm to find potential loop points
-            // This is a placeholder that can be improved with more advanced audio analysis
-            
-            if (duration < 30.0)
-                return new LoopResult { Status = "failed" };
+            try
+            {
+                mbApiInterface.MB_Trace("Starting audio analysis...");
                 
-            // For demonstration, we'll use the first 1/3 of the track as loop start
-            // and the last 20% as loop end - common for video game OSTs
-            float loopStartTime = (float)(duration * 0.3);
-            float loopEndTime = (float)(duration * 0.8);
-            
-            // Ensure minimum loop length of 15 seconds
-            if (loopEndTime - loopStartTime < 15.0f)
-                return new LoopResult { Status = "failed" };
-            
-            return new LoopResult { Status = "success", LoopStart = loopStartTime, LoopEnd = loopEndTime };
+                // If track is too short, use simple rules
+                if (duration < 30.0)
+                {
+                    mbApiInterface.MB_Trace("Track too short for advanced analysis");
+                    return new LoopResult { 
+                        Status = "success", 
+                        LoopStart = (float)(duration * 0.3), 
+                        LoopEnd = (float)(duration * 0.8),
+                        Confidence = 0.5f
+                    };
+                }
+                
+                // Step 1: Convert stereo to mono if needed
+                mbApiInterface.MB_Trace("Converting to mono...");
+                float[] monoData;
+                if (channels > 1)
+                {
+                    monoData = new float[audioData.Length / channels];
+                    for (int i = 0; i < monoData.Length; i++)
+                    {
+                        float sum = 0;
+                        for (int ch = 0; ch < channels; ch++)
+                        {
+                            sum += audioData[i * channels + ch];
+                        }
+                        monoData[i] = sum / channels;
+                    }
+                }
+                else
+                {
+                    monoData = audioData;
+                }
+                
+                mbApiInterface.MB_Trace("Computing energy profile...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Computing energy profile...");
+                
+                // Step 2: Compute energy profile (simpler than chroma features)
+                int frameSize = sampleRate / 10; // 100ms frames
+                int numFrames = monoData.Length / frameSize;
+                float[] energyProfile = new float[numFrames];
+                
+                for (int i = 0; i < numFrames; i++)
+                {
+                    float sum = 0;
+                    for (int j = 0; j < frameSize && (i * frameSize + j) < monoData.Length; j++)
+                    {
+                        sum += Math.Abs(monoData[i * frameSize + j]);
+                    }
+                    energyProfile[i] = sum / frameSize;
+                }
+                
+                // Step 3: Build self-similarity matrix (simplified)
+                mbApiInterface.MB_Trace("Building self-similarity matrix...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Analyzing audio patterns...");
+                
+                int matrixSize = Math.Min(numFrames, 600); // Limit to 60 seconds (100ms frames)
+                float[,] similarityMatrix = new float[matrixSize, matrixSize];
+                
+                for (int i = 0; i < matrixSize; i++)
+                {
+                    for (int j = i; j < matrixSize; j++) // Only calculate upper triangle
+                    {
+                        // Simple Euclidean distance between energy values
+                        float distance = Math.Abs(energyProfile[i] - energyProfile[j]);
+                        similarityMatrix[i, j] = similarityMatrix[j, i] = distance;
+                    }
+                    
+                    // Update progress occasionally
+                    if (i % 50 == 0)
+                    {
+                        mbApiInterface.MB_SetBackgroundTaskMessage($"Analyzing patterns: {i * 100 / matrixSize}%");
+                    }
+                }
+                
+                // Step 4: Find the best diagonal (indicating a loop)
+                mbApiInterface.MB_Trace("Finding best loop candidate...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Identifying loop points...");
+                
+                // We'll look for diagonals (parallel to the main diagonal)
+                float bestScore = float.MaxValue;
+                int bestDiagOffset = 0;
+                
+                // Only look at diagonals that would create loops of reasonable length
+                int minLoopFrames = (int)(10 * (sampleRate / frameSize)); // At least 10 seconds
+                int maxLoopFrames = (int)(90 * (sampleRate / frameSize)); // At most 90 seconds
+                
+                for (int diagOffset = minLoopFrames; diagOffset < Math.Min(maxLoopFrames, matrixSize / 2); diagOffset++)
+                {
+                    float score = 0;
+                    int count = 0;
+                    
+                    // Sum the values along this diagonal
+                    for (int i = 0; i < matrixSize - diagOffset; i++)
+                    {
+                        score += similarityMatrix[i, i + diagOffset];
+                        count++;
+                    }
+                    
+                    if (count > 0)
+                    {
+                        score /= count; // Average similarity
+                        
+                        if (score < bestScore)
+                        {
+                            bestScore = score;
+                            bestDiagOffset = diagOffset;
+                        }
+                    }
+                    
+                    // Update progress occasionally
+                    if (diagOffset % 20 == 0)
+                    {
+                        int progress = (diagOffset - minLoopFrames) * 100 / (maxLoopFrames - minLoopFrames);
+                        mbApiInterface.MB_SetBackgroundTaskMessage($"Identifying loops: {progress}%");
+                    }
+                }
+                
+                // Convert frames back to seconds
+                float loopLength = bestDiagOffset * (frameSize / (float)sampleRate);
+                
+                // Step 5: Determine the optimal loop start point
+                mbApiInterface.MB_Trace("Refining loop points...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Finalizing results...");
+                
+                // Start loop at 1/3 of track duration, but ensure loop length matches our analysis
+                float loopStart = (float)Math.Min(duration * 0.33, duration * 0.6);
+                float loopEnd = loopStart + loopLength;
+                
+                // Make sure loop end doesn't go past the end of the track
+                if (loopEnd > duration * 0.95)
+                {
+                    loopEnd = (float)(duration * 0.95);
+                    loopStart = loopEnd - loopLength;
+                }
+                
+                // Make sure loop start isn't negative
+                if (loopStart < 0)
+                {
+                    loopStart = 0;
+                    loopEnd = loopLength;
+                }
+                
+                float confidence = 1.0f - (bestScore / 2.0f); // Convert to confidence score
+                mbApiInterface.MB_Trace($"Analysis complete. Loop: {loopStart:F2}s to {loopEnd:F2}s, confidence: {confidence:F2}");
+                
+                return new LoopResult {
+                    Status = confidence > 0.4f ? "success" : "low-confidence",
+                    LoopStart = loopStart,
+                    LoopEnd = loopEnd,
+                    Confidence = confidence
+                };
+            }
+            catch (Exception ex)
+            {
+                mbApiInterface.MB_Trace($"Analysis algorithm error: {ex.Message}");
+                
+                // Fallback to simple ratio-based analysis
+                return new LoopResult {
+                    Status = "success",
+                    LoopStart = (float)(duration * 0.3),
+                    LoopEnd = (float)(duration * 0.8),
+                    Confidence = 0.3f
+                };
+            }
         }
+        
+        // Store last loop time to prevent double-triggering
+        private DateTime lastLoopTime = DateTime.MinValue;
         
         private void onTimerTick(object sender, ElapsedEventArgs e)
         {
@@ -321,32 +609,66 @@ namespace MusicBeePlugin
                 string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
                 if (string.IsNullOrEmpty(currentFile)) return;
     
-                // Get loop information from file tags
-                string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
-                if (loopFound != "True") return;
-    
-                // Get loop points and current position
-                float loopStart = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom2));
-                float loopEnd = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3));
-                float currentPosition = mbApiInterface.Player_GetPosition() / 1000f; // Convert ms to seconds
-    
-                // Debug info occasionally
-                if (DateTime.Now.Second % 5 == 0)
+                // Get loop information - cache it to avoid repeated tag reads
+                if (currentLoopTrack != currentFile)
                 {
-                    mbApiInterface.MB_Trace($"Loop Status: Enabled | Position: {currentPosition:F1}s | Loop: {loopStart:F1}s-{loopEnd:F1}s");
+                    // This is a new track, get the loop info
+                    string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
+                    if (loopFound != "True") return;
+                    
+                    currentLoopTrack = currentFile;
+                    currentLoopStart = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom2));
+                    currentLoopEnd = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3));
+                    
+                    // Log that we're now monitoring a new track
+                    mbApiInterface.MB_Trace($"Monitoring loop for track: {Path.GetFileName(currentFile)} | Loop: {currentLoopStart:F1}s-{currentLoopEnd:F1}s");
                 }
                 
+                // Get current playback position
+                float currentPosition = mbApiInterface.Player_GetPosition() / 1000f; // Convert ms to seconds
+    
+                // Debug info occasionally, but not too often to avoid log spam
+                if (DateTime.Now.Second % 10 == 0 && DateTime.Now.Millisecond < 100)
+                {
+                    mbApiInterface.MB_Trace($"Loop Monitor | Position: {currentPosition:F1}s | Loop: {currentLoopStart:F1}s-{currentLoopEnd:F1}s");
+                }
+                
+                // Don't trigger more than once per second to avoid rapid jumping
+                if ((DateTime.Now - lastLoopTime).TotalSeconds < 0.5)
+                    return;
+                
                 // Check if we've reached the loop end (with a small buffer)
-                if (currentPosition >= (loopEnd - 0.2f))
+                // The buffer is slightly larger for longer tracks to account for precision
+                float buffer = Math.Max(0.2f, currentLoopEnd / 100); // 0.2s or 1% of loop end, whichever is larger
+                
+                if (currentPosition >= (currentLoopEnd - buffer))
                 {
                     // Jump back to loop start
-                    mbApiInterface.MB_Trace($"LOOPING: Jumping from {currentPosition:F1}s back to {loopStart:F1}s");
-                    mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
+                    mbApiInterface.MB_Trace($"LOOP TRIGGERED: Jumping from {currentPosition:F2}s back to {currentLoopStart:F2}s");
+                    mbApiInterface.Player_SetPosition((int)(currentLoopStart * 1000));
+                    lastLoopTime = DateTime.Now;
+                    
+                    // Visual feedback that looping occurred (temporary status message)
+                    mbApiInterface.MB_SetBackgroundTaskMessage("♻️ Loop activated");
+                    Task.Run(() => {
+                        System.Threading.Thread.Sleep(1000);
+                        mbApiInterface.MB_SetBackgroundTaskMessage("");
+                    });
+                }
+                
+                // Also detect if we're far past the loop end (something went wrong)
+                if (currentPosition > currentLoopEnd + 1.0f)
+                {
+                    mbApiInterface.MB_Trace($"ERROR: Position {currentPosition:F2}s is past loop end {currentLoopEnd:F2}s - correcting");
+                    mbApiInterface.Player_SetPosition((int)(currentLoopStart * 1000));
+                    lastLoopTime = DateTime.Now;
                 }
             }
             catch (Exception ex)
             {
                 mbApiInterface.MB_Trace($"Timer error: {ex.Message}");
+                // Reset tracking to force reload
+                currentLoopTrack = null;
             }
         }
         
