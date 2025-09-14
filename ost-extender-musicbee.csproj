@@ -3,9 +3,13 @@
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>MusicBeePlugin</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AssemblyName>mb_OstLooper</AssemblyName>
     <PlatformTarget>x86</PlatformTarget>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,14 +18,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Accord" Version="3.8.0" />
+    <PackageReference Include="Accord.Audio" Version="3.8.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="Analysis\looper.py">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
 
 </Project>
