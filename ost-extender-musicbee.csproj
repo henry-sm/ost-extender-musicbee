@@ -11,6 +11,11 @@
   <PropertyGroup>
     <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
+  
+  <PropertyGroup>
+    <!-- Define MusicBee plugins folder - adjust as needed -->
+    <MusicBeePluginsFolder>$(APPDATA)\MusicBee\Plugins</MusicBeePluginsFolder>
+  </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="System.Windows.Forms" />
@@ -23,5 +28,15 @@
     <PackageReference Include="Accord.Math" Version="3.8.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
+
+  <!-- Post-build commands to copy the plugin to MusicBee -->
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="!Exists('$(MusicBeePluginsFolder)\$(TargetFileName).locked')">
+    <Message Text="MusicBee plugins folder: $(MusicBeePluginsFolder)" Importance="high" />
+    <MakeDir Directories="$(MusicBeePluginsFolder)" Condition="!Exists('$(MusicBeePluginsFolder)')" />
+    <Message Text="Build successful. To install the plugin:" Importance="high" />
+    <Message Text="1. Close MusicBee if it's running" Importance="high" />
+    <Message Text="2. Copy '$(TargetDir)mb_OstLooper.dll' to '$(MusicBeePluginsFolder)'" Importance="high" />
+    <Message Text="3. Restart MusicBee and look for menu items under Tools > Plugins > OST Extender" Importance="high" />
+  </Target>
 
 </Project>
