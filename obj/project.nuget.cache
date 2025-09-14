@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "sRjhKLT/sPY=",
+  "success": true,
+  "projectFilePath": "C:\\Siddhant\\Programming\\Projects\\ost-extender-musicbee\\ost-extender-musicbee.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Siddhant\\.nuget\\packages\\microsoft.netcore.platforms\\1.1.0\\microsoft.netcore.platforms.1.1.0.nupkg.sha512",
+    "C:\\Users\\Siddhant\\.nuget\\packages\\netstandard.library\\2.0.3\\netstandard.library.2.0.3.nupkg.sha512"
+  ],
+  "logs": []
+}
