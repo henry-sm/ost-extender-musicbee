@@ -44,6 +44,10 @@
         "net48": {
           "targetAlias": "net48",
           "dependencies": {
+            "Accord.Audio": {
+              "target": "Package",
+              "version": "[3.8.0, )"
+            },
             "NAudio": {
               "target": "Package",
               "version": "[2.2.1, )"
@@ -51,10 +55,6 @@
             "Newtonsoft.Json": {
               "target": "Package",
               "version": "[13.0.3, )"
-            },
-            "pythonnet": {
-              "target": "Package",
-              "version": "[3.0.3, )"
             }
           },
           "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.305\\RuntimeIdentifierGraph.json"
