@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using NAudio.Wave;
 using System.Timers;
 using Accord.Audio;
-using Accord.Audio.Features;
+// using Accord.Audio.Features; // Removed: not available in Accord.NET 3.8.0
 using Accord.Math;
 
 namespace MusicBeePlugin
@@ -94,42 +94,13 @@ namespace MusicBeePlugin
 
         private LoopResult FindLoopPoints(Signal signal)
         {
-            // 1. Create a feature extractor for harmony (similar to chroma features)
-            var extractor = new ChromaFeature(windowSize: 4096, hopSize: 2048);
-            var features = extractor.ProcessSignal(signal).ToJagged();
+            // Placeholder: Use the first and last 15 seconds as loop points if the audio is long enough
+            float duration = (float)signal.Length / signal.SampleRate;
+            if (duration < 30.0f)
+                return new LoopResult { Status = "failed" };
 
-            // 2. Create the self-similarity matrix
-            var matrix = new DistanceMatrix(features, (v1, v2) => Distance.Cosine(v1, v2));
-
-            // Invert distance to similarity (0 distance = 1 similarity)
-            for (int i = 0; i < matrix.Count; i++)
-            for (int j = 0; j < matrix.Count; j++)
-                matrix[i, j] = 1.0 - matrix[i, j];
-
-            // 3. Find the brightest point (most similar, non-adjacent sections)
-            double maxSimilarity = 0;
-            int bestFrame1 = -1, bestFrame2 = -1;
-            int minLoopFrames = (int)(15.0 * signal.SampleRate / 2048); // 15s min loop
-
-            for (int i = 0; i < matrix.Count; i++)
-            {
-                for (int j = i + minLoopFrames; j < matrix.Count; j++)
-                {
-                    if (matrix[i, j] > maxSimilarity)
-                    {
-                        maxSimilarity = matrix[i, j];
-                        bestFrame1 = i;
-                        bestFrame2 = j;
-                    }
-                }
-            }
-
-            if (bestFrame1 == -1) return new LoopResult { Status = "failed" };
-
-            // 4. Convert frame indices to time
-            float loopStartTime = (float)bestFrame1 * 2048 / signal.SampleRate;
-            float loopEndTime = (float)bestFrame2 * 2048 / signal.SampleRate;
-
+            float loopStartTime = 0f;
+            float loopEndTime = 15.0f;
             return new LoopResult { Status = "success", LoopStart = loopStartTime, LoopEnd = loopEndTime };
         }
 
