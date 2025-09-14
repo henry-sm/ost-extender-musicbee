@@ -9,6 +9,7 @@ using Accord.Audio; // Base audio classes
 // using Accord.Audio.Features; // Not available in Accord.NET 3.8.0
 using Accord.Math; // For the DistanceMatrix
 using System.Collections.Generic;
+using System.Linq; // For LINQ extension methods like Take()
 
 namespace MusicBeePlugin
 {
@@ -356,20 +357,55 @@ namespace MusicBeePlugin
                         // Step 3: Save the results
                         mbApiInterface.MB_Trace($"Analysis result: {result.Status}");
                         
-                        if (result.Status == "success")
-                        {
+                        if (result.Status != "failed") {
+                            // Save the results since a loop was found
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom1, "True");
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom2, result.LoopStart.ToString());
                             mbApiInterface.Library_SetFileTag(filePath, MetaDataType.Custom3, result.LoopEnd.ToString());
                             mbApiInterface.Library_CommitTagsToFile(filePath);
                             
-                            // Show results on UI thread
-                            System.Windows.Forms.Form mainForm = System.Windows.Forms.Control.FromHandle(mbApiInterface.MB_GetWindowHandle()).FindForm();
-                            mainForm.Invoke(new Action(() => {
-                                MessageBox.Show(mainForm, $"Analysis complete!\nLoop found: {result.LoopStart:F2}s to {result.LoopEnd:F2}s",
-                                    "OST Extender", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                                mbApiInterface.MB_SetBackgroundTaskMessage("");
-                            }));
+                            // Format time values for display
+                            TimeSpan startTime = TimeSpan.FromSeconds(result.LoopStart);
+                            TimeSpan endTime = TimeSpan.FromSeconds(result.LoopEnd);
+                            TimeSpan loopLength = TimeSpan.FromSeconds(result.LoopEnd - result.LoopStart);
+                            string formattedStart = string.Format("{0:D2}:{1:D2}.{2:D1}", (int)startTime.TotalMinutes, startTime.Seconds, startTime.Milliseconds / 100);
+                            string formattedEnd = string.Format("{0:D2}:{1:D2}.{2:D1}", (int)endTime.TotalMinutes, endTime.Seconds, endTime.Milliseconds / 100);
+                            string formattedLength = string.Format("{0:D2}:{1:D2}.{2:D1}", (int)loopLength.TotalMinutes, loopLength.Seconds, loopLength.Milliseconds / 100);
+                            
+                            // Calculate percentage of track for visual reference
+                            using (var reader = new AudioFileReader(filePath))
+                            {
+                                double totalDuration = reader.TotalTime.TotalSeconds;
+                                int startPercent = (int)(result.LoopStart * 100 / totalDuration);
+                                int endPercent = (int)(result.LoopEnd * 100 / totalDuration);
+                                
+                                // Create a visual representation of the loop
+                                string loopVisual = "[" + new string('-', startPercent/5) + "|" + 
+                                                   new string('=', (endPercent - startPercent)/5) + "|" + 
+                                                   new string('-', (100 - endPercent)/5) + "]";
+                                
+                                // Show results on UI thread with detailed information
+                                System.Windows.Forms.Form mainForm = System.Windows.Forms.Control.FromHandle(mbApiInterface.MB_GetWindowHandle()).FindForm();
+                                mainForm.Invoke(new Action(() => {
+                                    string confidenceText = result.Status == "success" ? 
+                                        $"Confidence: {result.Confidence:P0} (High)" : 
+                                        $"Confidence: {result.Confidence:P0} (Moderate)";
+                                        
+                                    string message = $"Analysis complete! Loop points detected:\n\n" +
+                                                    $"Loop Start: {formattedStart} ({startPercent}% of track)\n" +
+                                                    $"Loop End: {formattedEnd} ({endPercent}% of track)\n" +
+                                                    $"Loop Length: {formattedLength}\n\n" +
+                                                    $"{loopVisual}\n\n" +
+                                                    $"{confidenceText}\n\n" +
+                                                    $"Use \"Play with Loop\" to test these loop points.";
+                                    
+                                    MessageBox.Show(mainForm, message, "OST Extender", 
+                                        MessageBoxButtons.OK, 
+                                        result.Status == "success" ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                                        
+                                    mbApiInterface.MB_SetBackgroundTaskMessage("");
+                                }));
+                            }
                         }
                         else
                         {
@@ -427,10 +463,10 @@ namespace MusicBeePlugin
         {
             try
             {
-                mbApiInterface.MB_Trace("Starting audio analysis...");
+                mbApiInterface.MB_Trace("Starting enhanced audio analysis...");
                 
                 // If track is too short, use simple rules
-                if (duration < 30.0)
+                if (duration < 20.0)
                 {
                     mbApiInterface.MB_Trace("Track too short for advanced analysis");
                     return new LoopResult { 
@@ -441,141 +477,200 @@ namespace MusicBeePlugin
                     };
                 }
                 
-                // Step 1: Convert stereo to mono if needed
-                mbApiInterface.MB_Trace("Converting to mono...");
-                float[] monoData;
-                if (channels > 1)
-                {
-                    monoData = new float[audioData.Length / channels];
-                    for (int i = 0; i < monoData.Length; i++)
-                    {
-                        float sum = 0;
-                        for (int ch = 0; ch < channels; ch++)
-                        {
-                            sum += audioData[i * channels + ch];
-                        }
-                        monoData[i] = sum / channels;
-                    }
-                }
-                else
-                {
-                    monoData = audioData;
-                }
+                // Step 1: Convert stereo to mono and normalize
+                mbApiInterface.MB_Trace("Converting to mono and normalizing...");
+                float[] monoData = ConvertToMono(audioData, channels);
                 
-                mbApiInterface.MB_Trace("Computing energy profile...");
-                mbApiInterface.MB_SetBackgroundTaskMessage("Computing energy profile...");
+                // Step 2: Compute multiple audio features for better accuracy
+                mbApiInterface.MB_SetBackgroundTaskMessage("Computing audio features...");
                 
-                // Step 2: Compute energy profile (simpler than chroma features)
-                int frameSize = sampleRate / 10; // 100ms frames
-                int numFrames = monoData.Length / frameSize;
-                float[] energyProfile = new float[numFrames];
+                // We'll use three features for better accuracy:
+                // 1. RMS Energy (volume)
+                // 2. Zero-Crossing Rate (frequency content)
+                // 3. Spectral Centroid (brightness/timbre)
                 
-                for (int i = 0; i < numFrames; i++)
-                {
-                    float sum = 0;
-                    for (int j = 0; j < frameSize && (i * frameSize + j) < monoData.Length; j++)
-                    {
-                        sum += Math.Abs(monoData[i * frameSize + j]);
-                    }
-                    energyProfile[i] = sum / frameSize;
-                }
+                // Define frame parameters - use musical timing (beats)
+                double frameDuration = 0.2; // 200ms frames (~tempo independent)
+                int frameSize = (int)(sampleRate * frameDuration);
+                int frameHop = frameSize / 2; // 50% overlap for better resolution
+                int numFrames = 1 + (monoData.Length - frameSize) / frameHop;
                 
-                // Step 3: Build self-similarity matrix (simplified)
-                mbApiInterface.MB_Trace("Building self-similarity matrix...");
-                mbApiInterface.MB_SetBackgroundTaskMessage("Analyzing audio patterns...");
+                mbApiInterface.MB_Trace($"Using {numFrames} frames of {frameDuration*1000}ms each");
                 
-                int matrixSize = Math.Min(numFrames, 600); // Limit to 60 seconds (100ms frames)
+                // Allocate feature arrays
+                float[] rmsEnergy = new float[numFrames];
+                float[] zeroCrossings = new float[numFrames];
+                float[] spectralCentroid = new float[numFrames];
+                
+                // Extract features
+                ExtractAudioFeatures(monoData, sampleRate, frameSize, frameHop, 
+                                    rmsEnergy, zeroCrossings, spectralCentroid);
+                
+                // Step 3: Build enhanced self-similarity matrix using multiple features
+                mbApiInterface.MB_Trace("Building multi-feature similarity matrix...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Analyzing patterns...");
+                
+                // Limit matrix size for memory/performance while keeping enough musical context
+                int matrixSize = Math.Min(numFrames, 1000); 
                 float[,] similarityMatrix = new float[matrixSize, matrixSize];
                 
+                // Calculate feature weights (giving more importance to energy)
+                float energyWeight = 0.6f;
+                float zcWeight = 0.2f;
+                float centroidWeight = 0.2f;
+                
+                // Fill similarity matrix using weighted feature combination
                 for (int i = 0; i < matrixSize; i++)
                 {
-                    for (int j = i; j < matrixSize; j++) // Only calculate upper triangle
+                    // Process in batches for performance
+                    for (int j = i; j < matrixSize; j += 10)
                     {
-                        // Simple Euclidean distance between energy values
-                        float distance = Math.Abs(energyProfile[i] - energyProfile[j]);
-                        similarityMatrix[i, j] = similarityMatrix[j, i] = distance;
-                    }
-                    
-                    // Update progress occasionally
-                    if (i % 50 == 0)
-                    {
-                        mbApiInterface.MB_SetBackgroundTaskMessage($"Analyzing patterns: {i * 100 / matrixSize}%");
-                    }
-                }
-                
-                // Step 4: Find the best diagonal (indicating a loop)
-                mbApiInterface.MB_Trace("Finding best loop candidate...");
-                mbApiInterface.MB_SetBackgroundTaskMessage("Identifying loop points...");
-                
-                // We'll look for diagonals (parallel to the main diagonal)
-                float bestScore = float.MaxValue;
-                int bestDiagOffset = 0;
-                
-                // Only look at diagonals that would create loops of reasonable length
-                int minLoopFrames = (int)(10 * (sampleRate / frameSize)); // At least 10 seconds
-                int maxLoopFrames = (int)(90 * (sampleRate / frameSize)); // At most 90 seconds
-                
-                for (int diagOffset = minLoopFrames; diagOffset < Math.Min(maxLoopFrames, matrixSize / 2); diagOffset++)
-                {
-                    float score = 0;
-                    int count = 0;
-                    
-                    // Sum the values along this diagonal
-                    for (int i = 0; i < matrixSize - diagOffset; i++)
-                    {
-                        score += similarityMatrix[i, i + diagOffset];
-                        count++;
-                    }
-                    
-                    if (count > 0)
-                    {
-                        score /= count; // Average similarity
-                        
-                        if (score < bestScore)
+                        int endJ = Math.Min(j + 10, matrixSize);
+                        for (int k = j; k < endJ; k++)
                         {
-                            bestScore = score;
-                            bestDiagOffset = diagOffset;
+                            // Calculate weighted distance between feature vectors
+                            float energyDist = Math.Abs(rmsEnergy[i] - rmsEnergy[k]);
+                            float zcDist = Math.Abs(zeroCrossings[i] - zeroCrossings[k]);
+                            float centroidDist = Math.Abs(spectralCentroid[i] - spectralCentroid[k]);
+                            
+                            // Combine with weights
+                            float distance = (energyWeight * energyDist) + 
+                                           (zcWeight * zcDist) + 
+                                           (centroidWeight * centroidDist);
+                            
+                            similarityMatrix[i, k] = similarityMatrix[k, i] = distance;
                         }
                     }
                     
-                    // Update progress occasionally
+                    // Update progress
+                    if (i % 100 == 0)
+                    {
+                        int progress = i * 100 / matrixSize;
+                        mbApiInterface.MB_SetBackgroundTaskMessage($"Building similarity matrix: {progress}%");
+                    }
+                }
+                
+                // Step 4: Apply Gaussian blur to the similarity matrix to reduce noise
+                mbApiInterface.MB_Trace("Applying Gaussian smoothing...");
+                float[,] smoothedMatrix = GaussianSmoothMatrix(similarityMatrix, matrixSize);
+                
+                // Step 5: Find the best loop candidates using a more sophisticated approach
+                mbApiInterface.MB_Trace("Detecting optimal loop points...");
+                mbApiInterface.MB_SetBackgroundTaskMessage("Finding optimal loops...");
+                
+                // Parameters for loop detection
+                int minLoopFrames = (int)(8 / frameDuration);   // Min 8 seconds
+                int maxLoopFrames = (int)(120 / frameDuration); // Max 2 minutes
+                int frameStep = Math.Max(1, minLoopFrames / 20); // Step size for efficiency
+                
+                // Variables to track best loops
+                List<LoopCandidate> loopCandidates = new List<LoopCandidate>();
+                
+                // Find promising loop regions by checking diagonals
+                mbApiInterface.MB_Trace("Searching for loop candidates...");
+                for (int diagOffset = minLoopFrames; diagOffset < Math.Min(maxLoopFrames, matrixSize/2); diagOffset += frameStep)
+                {
+                    // For each potential loop length, find the best starting point
+                    for (int startFrame = 0; startFrame < matrixSize/3; startFrame += frameStep)
+                    {
+                        int endFrame = startFrame + diagOffset;
+                        if (endFrame >= matrixSize) break;
+                        
+                        // Check similarity at this point
+                        float similarity = smoothedMatrix[startFrame, endFrame];
+                        
+                        // Also check surrounding area (context matters)
+                        float contextSimilarity = 0;
+                        int contextCount = 0;
+                        
+                        for (int c = -2; c <= 2; c++)
+                        {
+                            for (int d = -2; d <= 2; d++)
+                            {
+                                int si = startFrame + c;
+                                int ei = endFrame + d;
+                                
+                                if (si >= 0 && ei >= 0 && si < matrixSize && ei < matrixSize)
+                                {
+                                    contextSimilarity += smoothedMatrix[si, ei];
+                                    contextCount++;
+                                }
+                            }
+                        }
+                        
+                        if (contextCount > 0)
+                        {
+                            contextSimilarity /= contextCount;
+                            
+                            // Calculate final score (weighted combination of point similarity and context)
+                            float finalScore = (similarity * 0.7f) + (contextSimilarity * 0.3f);
+                            
+                            // Add to candidates if score is good
+                            if (finalScore < 0.3f) // Lower is better for distance-based similarity
+                            {
+                                loopCandidates.Add(new LoopCandidate {
+                                    StartFrame = startFrame,
+                                    EndFrame = endFrame,
+                                    Score = finalScore
+                                });
+                            }
+                        }
+                    }
+                    
+                    // Update progress
                     if (diagOffset % 20 == 0)
                     {
                         int progress = (diagOffset - minLoopFrames) * 100 / (maxLoopFrames - minLoopFrames);
-                        mbApiInterface.MB_SetBackgroundTaskMessage($"Identifying loops: {progress}%");
+                        mbApiInterface.MB_SetBackgroundTaskMessage($"Detecting loops: {progress}%");
                     }
                 }
                 
-                // Convert frames back to seconds
-                float loopLength = bestDiagOffset * (frameSize / (float)sampleRate);
+                // Step 6: Select the best loop candidate
+                mbApiInterface.MB_Trace($"Found {loopCandidates.Count} potential loop candidates");
                 
-                // Step 5: Determine the optimal loop start point
-                mbApiInterface.MB_Trace("Refining loop points...");
-                mbApiInterface.MB_SetBackgroundTaskMessage("Finalizing results...");
-                
-                // Start loop at 1/3 of track duration, but ensure loop length matches our analysis
-                float loopStart = (float)Math.Min(duration * 0.33, duration * 0.6);
-                float loopEnd = loopStart + loopLength;
-                
-                // Make sure loop end doesn't go past the end of the track
-                if (loopEnd > duration * 0.95)
+                if (loopCandidates.Count == 0)
                 {
-                    loopEnd = (float)(duration * 0.95);
-                    loopStart = loopEnd - loopLength;
+                    // Fallback to simple approach
+                    mbApiInterface.MB_Trace("No strong candidates found, using fallback");
+                    return GetFallbackLoop(duration);
                 }
                 
-                // Make sure loop start isn't negative
-                if (loopStart < 0)
+                // Sort candidates by score (lowest is best)
+                loopCandidates.Sort((a, b) => a.Score.CompareTo(b.Score));
+                
+                // Get top candidates
+                var topCandidates = loopCandidates.Take(5).ToList();
+                
+                // Pick the best candidate based on musical criteria
+                LoopCandidate bestCandidate = SelectBestMusicalCandidate(topCandidates, frameDuration);
+                
+                // Convert to time in seconds
+                float loopStart = (float)(bestCandidate.StartFrame * frameHop / (double)sampleRate);
+                float loopEnd = (float)(bestCandidate.EndFrame * frameHop / (double)sampleRate);
+                
+                // Refine loop points - adjust to nearest likely beat boundary
+                float[] adjustedPoints = RefineLoopPoints(monoData, sampleRate, loopStart, loopEnd);
+                loopStart = adjustedPoints[0];
+                loopEnd = adjustedPoints[1];
+                
+                // Safety checks
+                if (loopEnd > duration * 0.98)
                 {
-                    loopStart = 0;
-                    loopEnd = loopLength;
+                    loopEnd = (float)(duration * 0.98);
                 }
                 
-                float confidence = 1.0f - (bestScore / 2.0f); // Convert to confidence score
-                mbApiInterface.MB_Trace($"Analysis complete. Loop: {loopStart:F2}s to {loopEnd:F2}s, confidence: {confidence:F2}");
+                if (loopStart < duration * 0.1)
+                {
+                    loopStart = (float)(duration * 0.1);
+                }
+                
+                // Calculate confidence
+                float confidence = 1.0f - bestCandidate.Score;
+                
+                mbApiInterface.MB_Trace($"Enhanced analysis complete. Loop: {loopStart:F2}s to {loopEnd:F2}s, confidence: {confidence:F2}");
                 
                 return new LoopResult {
-                    Status = confidence > 0.4f ? "success" : "low-confidence",
+                    Status = "success",
                     LoopStart = loopStart,
                     LoopEnd = loopEnd,
                     Confidence = confidence
@@ -583,16 +678,330 @@ namespace MusicBeePlugin
             }
             catch (Exception ex)
             {
-                mbApiInterface.MB_Trace($"Analysis algorithm error: {ex.Message}");
+                mbApiInterface.MB_Trace($"Analysis algorithm error: {ex.Message}\n{ex.StackTrace}");
                 
                 // Fallback to simple ratio-based analysis
-                return new LoopResult {
-                    Status = "success",
-                    LoopStart = (float)(duration * 0.3),
-                    LoopEnd = (float)(duration * 0.8),
-                    Confidence = 0.3f
-                };
+                return GetFallbackLoop(duration);
             }
+        }
+        
+        // Helper class for loop candidates
+        private class LoopCandidate
+        {
+            public int StartFrame { get; set; }
+            public int EndFrame { get; set; }
+            public float Score { get; set; }
+        }
+        
+        // Convert audio to mono
+        private float[] ConvertToMono(float[] audioData, int channels)
+        {
+            if (channels == 1) return audioData;
+            
+            float[] monoData = new float[audioData.Length / channels];
+            for (int i = 0; i < monoData.Length; i++)
+            {
+                float sum = 0;
+                for (int ch = 0; ch < channels; ch++)
+                {
+                    sum += audioData[i * channels + ch];
+                }
+                monoData[i] = sum / channels;
+            }
+            return monoData;
+        }
+        
+        // Extract multiple audio features for better analysis
+        private void ExtractAudioFeatures(float[] monoData, int sampleRate, int frameSize, int frameHop,
+                                         float[] rmsEnergy, float[] zeroCrossings, float[] spectralCentroid)
+        {
+            int numFrames = rmsEnergy.Length;
+            
+            for (int i = 0; i < numFrames; i++)
+            {
+                int startIdx = i * frameHop;
+                
+                // Ensure we don't go out of bounds
+                if (startIdx + frameSize > monoData.Length)
+                    break;
+                
+                // 1. RMS Energy
+                float sumSquared = 0;
+                for (int j = 0; j < frameSize; j++)
+                {
+                    sumSquared += monoData[startIdx + j] * monoData[startIdx + j];
+                }
+                rmsEnergy[i] = (float)Math.Sqrt(sumSquared / frameSize);
+                
+                // 2. Zero-crossing rate
+                int zcCount = 0;
+                for (int j = 1; j < frameSize; j++)
+                {
+                    if ((monoData[startIdx + j] >= 0 && monoData[startIdx + j - 1] < 0) ||
+                        (monoData[startIdx + j] < 0 && monoData[startIdx + j - 1] >= 0))
+                    {
+                        zcCount++;
+                    }
+                }
+                zeroCrossings[i] = (float)zcCount / frameSize;
+                
+                // 3. Simplified spectral centroid (using zero-crossing as a proxy for brightness)
+                // This is a simplification since we don't have full FFT support
+                spectralCentroid[i] = zeroCrossings[i] * sampleRate / 2;
+                
+                // Update progress occasionally
+                if (i % 200 == 0)
+                {
+                    mbApiInterface.MB_SetBackgroundTaskMessage($"Computing features: {i * 100 / numFrames}%");
+                }
+            }
+            
+            // Normalize features to 0-1 range for better comparison
+            NormalizeArray(rmsEnergy);
+            NormalizeArray(zeroCrossings);
+            NormalizeArray(spectralCentroid);
+        }
+        
+        // Normalize array to 0-1 range
+        private void NormalizeArray(float[] array)
+        {
+            float min = array.Min();
+            float max = array.Max();
+            float range = max - min;
+            
+            if (range > 0)
+            {
+                for (int i = 0; i < array.Length; i++)
+                {
+                    array[i] = (array[i] - min) / range;
+                }
+            }
+        }
+        
+        // Apply Gaussian blur to reduce noise in the similarity matrix
+        private float[,] GaussianSmoothMatrix(float[,] matrix, int size)
+        {
+            float[,] result = new float[size, size];
+            int kernelSize = 3; // 3x3 kernel
+            float sigma = 1.0f;
+            
+            // Create Gaussian kernel
+            float[] kernel = new float[kernelSize];
+            float kernelSum = 0;
+            
+            for (int i = 0; i < kernelSize; i++)
+            {
+                int dist = i - kernelSize/2;
+                kernel[i] = (float)Math.Exp(-(dist*dist) / (2*sigma*sigma));
+                kernelSum += kernel[i];
+            }
+            
+            // Normalize kernel
+            for (int i = 0; i < kernelSize; i++)
+            {
+                kernel[i] /= kernelSum;
+            }
+            
+            // Apply horizontal pass
+            float[,] temp = new float[size, size];
+            
+            for (int i = 0; i < size; i++)
+            {
+                for (int j = 0; j < size; j++)
+                {
+                    float sum = 0;
+                    float weightSum = 0;
+                    
+                    for (int k = 0; k < kernelSize; k++)
+                    {
+                        int idx = j + k - kernelSize/2;
+                        
+                        if (idx >= 0 && idx < size)
+                        {
+                            sum += matrix[i, idx] * kernel[k];
+                            weightSum += kernel[k];
+                        }
+                    }
+                    
+                    temp[i, j] = sum / weightSum;
+                }
+            }
+            
+            // Apply vertical pass
+            for (int i = 0; i < size; i++)
+            {
+                for (int j = 0; j < size; j++)
+                {
+                    float sum = 0;
+                    float weightSum = 0;
+                    
+                    for (int k = 0; k < kernelSize; k++)
+                    {
+                        int idx = i + k - kernelSize/2;
+                        
+                        if (idx >= 0 && idx < size)
+                        {
+                            sum += temp[idx, j] * kernel[k];
+                            weightSum += kernel[k];
+                        }
+                    }
+                    
+                    result[i, j] = sum / weightSum;
+                }
+            }
+            
+            return result;
+        }
+        
+        // Select the best musical candidate from top candidates
+        private LoopCandidate SelectBestMusicalCandidate(List<LoopCandidate> candidates, double frameDuration)
+        {
+            if (candidates == null || candidates.Count == 0)
+                return null;
+                
+            // Prefer candidates that create loops of musical lengths (multiple of 4 or 8 seconds)
+            foreach (var candidate in candidates)
+            {
+                double loopLength = (candidate.EndFrame - candidate.StartFrame) * frameDuration;
+                
+                // Calculate how close this is to a multiple of 4 seconds
+                double mod4 = loopLength % 4.0;
+                if (mod4 > 2.0) mod4 = 4.0 - mod4;
+                
+                // Apply a musical bonus to the score based on how well it aligns with musical timing
+                double musicality = mod4 / 4.0; // 0 is perfect, 0.5 is worst
+                
+                // Adjust score to prefer musical timing
+                candidate.Score = (float)(candidate.Score * (1.0 + musicality * 0.3));
+            }
+            
+            // Re-sort with musical criteria applied
+            candidates.Sort((a, b) => a.Score.CompareTo(b.Score));
+            
+            return candidates[0];
+        }
+        
+        // Refine loop points to align with beats or strong transients
+        private float[] RefineLoopPoints(float[] audioData, int sampleRate, float loopStartSec, float loopEndSec)
+        {
+            try
+            {
+                // Convert seconds to samples
+                int loopStartSample = (int)(loopStartSec * sampleRate);
+                int loopEndSample = (int)(loopEndSec * sampleRate);
+                
+                // Look for strong transients near the loop points
+                int windowSize = sampleRate / 4; // 250ms window
+                
+                // Refine loop start
+                int bestStartOffset = 0;
+                float bestStartEnergy = 0;
+                
+                for (int i = -windowSize; i < windowSize; i++)
+                {
+                    int idx = loopStartSample + i;
+                    if (idx < 0 || idx + windowSize >= audioData.Length)
+                        continue;
+                        
+                    // Calculate local energy
+                    float energy = 0;
+                    for (int j = 0; j < windowSize/10; j++)
+                    {
+                        int sampleIdx = idx + j;
+                        if (sampleIdx < audioData.Length)
+                            energy += Math.Abs(audioData[sampleIdx]);
+                    }
+                    
+                    // Look for high energy onset
+                    if (energy > bestStartEnergy)
+                    {
+                        bestStartEnergy = energy;
+                        bestStartOffset = i;
+                    }
+                }
+                
+                // Refine loop end similarly
+                int bestEndOffset = 0;
+                float bestEndEnergy = 0;
+                
+                for (int i = -windowSize; i < windowSize; i++)
+                {
+                    int idx = loopEndSample + i;
+                    if (idx < 0 || idx + windowSize >= audioData.Length)
+                        continue;
+                        
+                    // Calculate energy but also consider similarity to start point
+                    float energy = 0;
+                    float similarity = 0;
+                    
+                    for (int j = 0; j < windowSize/10; j++)
+                    {
+                        int sampleIdx = idx + j;
+                        int startIdx = loopStartSample + bestStartOffset + j;
+                        
+                        if (sampleIdx < audioData.Length && startIdx < audioData.Length)
+                        {
+                            energy += Math.Abs(audioData[sampleIdx]);
+                            similarity += Math.Abs(audioData[sampleIdx] - audioData[startIdx]);
+                        }
+                    }
+                    
+                    // Combine energy and similarity
+                    float combinedScore = energy - similarity*0.5f;
+                    
+                    if (combinedScore > bestEndEnergy)
+                    {
+                        bestEndEnergy = combinedScore;
+                        bestEndOffset = i;
+                    }
+                }
+                
+                // Apply offsets
+                float refinedStart = loopStartSec + (bestStartOffset / (float)sampleRate);
+                float refinedEnd = loopEndSec + (bestEndOffset / (float)sampleRate);
+                
+                return new float[] { refinedStart, refinedEnd };
+            }
+            catch
+            {
+                // If refinement fails, return original points
+                return new float[] { loopStartSec, loopEndSec };
+            }
+        }
+        
+        // Get fallback loop points
+        private LoopResult GetFallbackLoop(double duration)
+        {
+            // Use more intelligent fallback based on typical video game OST structure
+            float loopStart, loopEnd;
+            
+            if (duration < 60)
+            {
+                // Short tracks often loop from 1/3 to end
+                loopStart = (float)(duration * 0.33);
+                loopEnd = (float)(duration * 0.9);
+            }
+            else if (duration < 120)
+            {
+                // Medium tracks often have intro + loop structure
+                loopStart = (float)(duration * 0.25);
+                loopEnd = (float)(duration * 0.9);
+            }
+            else
+            {
+                // Longer tracks might have multiple sections
+                loopStart = (float)(duration * 0.4);
+                loopEnd = (float)(duration * 0.9);
+            }
+            
+            mbApiInterface.MB_Trace($"Using fallback loop: {loopStart:F2}s to {loopEnd:F2}s");
+            
+            return new LoopResult {
+                Status = "fallback",
+                LoopStart = loopStart,
+                LoopEnd = loopEnd,
+                Confidence = 0.4f
+            };
         }
         
         // Store last loop time to prevent double-triggering
