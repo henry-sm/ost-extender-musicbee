@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading.Tasks;
 using NAudio.Wave;
 using Python.Runtime;
+using System.Timers; // Required for our own timer
 
 namespace MusicBeePlugin
 {
@@ -13,6 +14,7 @@ namespace MusicBeePlugin
         private MusicBeeApiInterface mbApiInterface;
         private PluginInfo about = new PluginInfo();
         private static bool pythonInitialized = false;
+        private System.Timers.Timer playbackTimer; // Our own timer
 
         public PluginInfo Initialise(IntPtr apiInterfacePtr)
         {
@@ -22,13 +24,10 @@ namespace MusicBeePlugin
             about.Name = "OST Looper (Local)";
             about.Description = "Finds seamless loops using a local, embedded Python engine.";
             about.Author = "Your Name";
-            about.TargetApplication = ""; // No dockable panel
+            about.TargetApplication = "";
             about.Type = PluginType.General;
             about.VersionMajor = 1;
             about.VersionMinor = 0;
-            about.Revision = 1;
-            about.MinInterfaceVersion = MinInterfaceVersion;
-            about.MinApiRevision = MinApiRevision;
             about.ReceiveNotifications = (ReceiveNotificationFlags.PlayerEvents);
             about.ConfigurationPanelHeight = 0;
 
@@ -41,14 +40,21 @@ namespace MusicBeePlugin
             }
 
             mbApiInterface.MB_AddMenuItem("CONTEXT/TRACK:Find Seamless Loop (Local)", "OST Looper: Analyze Track Locally", onAnalyzeTrack);
-            mbApiInterface.MB_RegisterTimer(100, onTimerTick);
+            
+            // --- FIX 1: Create and start our own timer ---
+            playbackTimer = new System.Timers.Timer(100); // Check every 100ms
+            playbackTimer.Elapsed += onTimerTick;
+            playbackTimer.AutoReset = true;
+            playbackTimer.Enabled = true;
+
             return about;
         }
-        
+
         private void onAnalyzeTrack(object sender, EventArgs e)
         {
             string[] files = null;
-            mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", ref files);
+            // --- FIX 2: Add the 'out' keyword ---
+            mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", out files);
             if (files == null || files.Length == 0) return;
             Task.Run(() => AnalyseTrack(files[0]));
         }
@@ -58,7 +64,6 @@ namespace MusicBeePlugin
             try
             {
                 mbApiInterface.MB_SetBackgroundTaskMessage($"Analyzing (Local): {Path.GetFileName(filePath)}");
-
                 float[] audioData = PreprocessAudio(filePath, out int sampleRate);
                 if (audioData == null) throw new Exception("Could not process audio file.");
 
@@ -67,10 +72,9 @@ namespace MusicBeePlugin
                     dynamic sys = Py.Import("sys");
                     string scriptDir = Path.Combine(Path.GetDirectoryName(typeof(Plugin).Assembly.Location), "Analysis");
                     sys.path.append(scriptDir);
-
                     dynamic looperModule = Py.Import("looper");
                     dynamic result = looperModule.find_loop_points_from_data(audioData, sampleRate);
-                    
+
                     string status = result.status;
                     if (status == "success")
                     {
@@ -95,7 +99,7 @@ namespace MusicBeePlugin
                 MessageBox.Show($"Analysis failed: {ex.Message}");
             }
         }
-        
+
         private float[] PreprocessAudio(string filePath, out int actualSampleRate)
         {
             using (var reader = new AudioFileReader(filePath))
@@ -109,10 +113,12 @@ namespace MusicBeePlugin
             }
         }
 
-        private void onTimerTick(object sender, EventArgs e)
+        private void onTimerTick(object sender, ElapsedEventArgs e)
         {
             if (mbApiInterface.Player_GetPlayState() != PlayState.Playing) return;
-            string currentFile = mbApiInterface.Player_GetFileUrl();
+            
+            // --- FIX 3: Use the correct function name ---
+            string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
             if (string.IsNullOrEmpty(currentFile)) return;
 
             string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
@@ -123,7 +129,8 @@ namespace MusicBeePlugin
                 float loopEnd = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3));
                 float currentPosition = mbApiInterface.Player_GetPosition() / 1000f;
 
-                if (currentPosition >= loopEnd)
+                // Add a buffer to prevent premature looping
+                if (currentPosition >= (loopEnd - 0.1f)) 
                 {
                     mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
                 }
