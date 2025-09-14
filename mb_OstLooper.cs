@@ -37,49 +37,93 @@ namespace MusicBeePlugin
             about.ReceiveNotifications = (ReceiveNotificationFlags.PlayerEvents);
             about.ConfigurationPanelHeight = 0;
 
-            // Add menu items - using direct paths for compatibility
-            mbApiInterface.MB_AddMenuItem("mnuTools/Plugins/OST Extender", "OST Extender", null);
-            mbApiInterface.MB_AddMenuItem("mnuTools/Plugins/OST Extender/Analyze Track", "Find Loop Points", onAnalyzeTrack);
-            mbApiInterface.MB_AddMenuItem("mnuTools/Plugins/OST Extender/Play with Loop", "Enable Smart Looping", onSmartLoop);
-            mbApiInterface.MB_AddMenuItem("mnuTools/Plugins/OST Extender/Create Extended Version", "Extend OST (A+B×5)", onExtendTrack);
-            mbApiInterface.MB_AddMenuItem("mnuTools/Plugins/OST Extender/Toggle Loop", "Toggle Smart Loop On/Off", onToggleSmartLoop);
+            // Add menu items to Tools menu
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender", "OST Extender", null);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Analyze Track", "Find Loop Points", onAnalyzeTrack);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Play with Loop", "Enable Smart Looping", onSmartLoop);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Create Extended Version", "Extend OST (A+B×5)", onExtendTrack);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Toggle Loop", "Toggle Smart Loop On/Off", onToggleSmartLoop);
 
-            // Add right-click context menu (File Browser panel context menu)
-            mbApiInterface.MB_AddMenuItem("mnuFileBrowserContextMenu/OST Extender", "OST Extender", null);
-            mbApiInterface.MB_AddMenuItem("mnuFileBrowserContextMenu/OST Extender/Analyze Track", "Find Loop Points", onAnalyzeTrack);
-            mbApiInterface.MB_AddMenuItem("mnuFileBrowserContextMenu/OST Extender/Play with Loop", "Enable Smart Looping", onSmartLoop);
-            mbApiInterface.MB_AddMenuItem("mnuFileBrowserContextMenu/OST Extender/Create Extended Version", "Extend OST", onExtendTrack);
+            // Add to multiple context menus to ensure it appears on right-click
+            string[] contextMenus = new[] {
+                "mnuTracklist", 
+                "mnuTracklistNoSelection",
+                "mnuFileListSongList", 
+                "mnuFileListSongListNoSelection",
+                "mnuContext" 
+            };
             
-            // Setup playback monitoring timer
-            playbackTimer = new System.Timers.Timer(100);
+            foreach (string menuPath in contextMenus)
+            {
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender", "OST Extender", null);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Analyze Track", "Find Loop Points", onAnalyzeTrack);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Play with Loop", "Enable Smart Looping", onSmartLoop);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Create Extended Version", "Extend OST", onExtendTrack);
+            }
+            
+            // Setup playback monitoring timer - check every 50ms for more responsive looping
+            playbackTimer = new System.Timers.Timer(50);
             playbackTimer.Elapsed += onTimerTick;
             playbackTimer.AutoReset = true;
             playbackTimer.Enabled = true;
+            
+            // Log that plugin is initialized
+            mbApiInterface.MB_Trace("OST Extender plugin initialized successfully.");
 
             return about;
         }
 
         public void ReceiveNotification(string sourceFileUrl, NotificationType type)
         {
-            if (type == NotificationType.PlayStateChanged)
+            try
             {
-                UpdateSmartLoopStatus();
+                // Log notification for debugging
+                mbApiInterface.MB_Trace($"Received notification: {type}");
+                
+                if (type == NotificationType.PlayStateChanged)
+                {
+                    UpdateSmartLoopStatus();
+                }
+                else if (type == NotificationType.TrackChanged)
+                {
+                    // When track changes, check if new track has loop points
+                    string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
+                    if (!string.IsNullOrEmpty(currentFile))
+                    {
+                        string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
+                        if (loopFound == "True" && smartLoopEnabled)
+                        {
+                            // Track has loop points and looping is enabled
+                            string loopStart = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom2);
+                            string loopEnd = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3);
+                            mbApiInterface.MB_Trace($"Track changed - loop points found: {loopStart}s-{loopEnd}s, Smart Loop is {(smartLoopEnabled ? "ENABLED" : "disabled")}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                mbApiInterface.MB_Trace($"Error in notification: {ex.Message}");
             }
         }
 
         private void UpdateSmartLoopStatus()
         {
+            // If not playing, don't disable loop (let user control it)
             if (mbApiInterface.Player_GetPlayState() != PlayState.Playing)
             {
-                smartLoopEnabled = false;
                 return;
             }
 
             string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
             if (string.IsNullOrEmpty(currentFile)) return;
 
+            // Only auto-enable if playing a loopable track, never auto-disable
             string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
-            smartLoopEnabled = (loopFound == "True");
+            if (loopFound == "True")
+            {
+                mbApiInterface.MB_Trace($"Auto-enabling smart loop for track with loop points");
+            }
         }
 
         // Check if a track has loop points detected
@@ -101,16 +145,39 @@ namespace MusicBeePlugin
         {
             string[] files = null;
             mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", out files);
-            if (files == null || files.Length == 0) return;
+            if (files == null || files.Length == 0)
+            {
+                MessageBox.Show("Please select a track first.");
+                return;
+            }
             
             if (IsTrackLoopable(files[0]))
             {
+                // Enable smart loop and show confirmation
                 smartLoopEnabled = true;
+                string loopStart = mbApiInterface.Library_GetFileTag(files[0], MetaDataType.Custom2);
+                string loopEnd = mbApiInterface.Library_GetFileTag(files[0], MetaDataType.Custom3);
+                
+                MessageBox.Show($"Smart Loop enabled! Track will loop from {loopStart}s to {loopEnd}s.");
+                
+                // Stop current playback
                 mbApiInterface.Player_Stop();
-                // Queue the track and play it
+                
+                // Queue and play the track
                 mbApiInterface.NowPlayingList_Clear();
                 mbApiInterface.NowPlayingList_QueueNext(files[0]);
                 mbApiInterface.Player_PlayNextTrack();
+                
+                // Set a timer to double-check that the loop is enabled
+                Task.Run(() => 
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    mbApiInterface.MB_Trace($"Smart Loop is {(smartLoopEnabled ? "ENABLED" : "disabled")} for track: {Path.GetFileName(files[0])}");
+                });
+            }
+            else
+            {
+                MessageBox.Show("This track hasn't been analyzed yet. Please use 'Analyze Track' first.");
             }
         }
         
@@ -245,22 +312,41 @@ namespace MusicBeePlugin
         
         private void onTimerTick(object sender, ElapsedEventArgs e)
         {
-            if (!smartLoopEnabled || mbApiInterface.Player_GetPlayState() != PlayState.Playing)
-                return;
-                
-            string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
-            if (string.IsNullOrEmpty(currentFile)) return;
-
-            string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
-            if (loopFound != "True") return;
-
-            float loopStart = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom2));
-            float loopEnd = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3));
-            float currentPosition = mbApiInterface.Player_GetPosition() / 1000f;
-
-            if (currentPosition >= (loopEnd - 0.1f))
+            try
             {
-                mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
+                // Check if we should be looping
+                if (!smartLoopEnabled || mbApiInterface.Player_GetPlayState() != PlayState.Playing)
+                    return;
+                    
+                string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
+                if (string.IsNullOrEmpty(currentFile)) return;
+    
+                // Get loop information from file tags
+                string loopFound = mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom1);
+                if (loopFound != "True") return;
+    
+                // Get loop points and current position
+                float loopStart = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom2));
+                float loopEnd = float.Parse(mbApiInterface.Library_GetFileTag(currentFile, MetaDataType.Custom3));
+                float currentPosition = mbApiInterface.Player_GetPosition() / 1000f; // Convert ms to seconds
+    
+                // Debug info occasionally
+                if (DateTime.Now.Second % 5 == 0)
+                {
+                    mbApiInterface.MB_Trace($"Loop Status: Enabled | Position: {currentPosition:F1}s | Loop: {loopStart:F1}s-{loopEnd:F1}s");
+                }
+                
+                // Check if we've reached the loop end (with a small buffer)
+                if (currentPosition >= (loopEnd - 0.2f))
+                {
+                    // Jump back to loop start
+                    mbApiInterface.MB_Trace($"LOOPING: Jumping from {currentPosition:F1}s back to {loopStart:F1}s");
+                    mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
+                }
+            }
+            catch (Exception ex)
+            {
+                mbApiInterface.MB_Trace($"Timer error: {ex.Message}");
             }
         }
         
