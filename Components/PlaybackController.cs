@@ -18,6 +18,7 @@ namespace MusicBeePlugin
         // Looping state
         private bool smartLoopEnabled = false;
         private DateTime lastLoopTime = DateTime.MinValue;
+        private DateTime lastPositionCheckTime = DateTime.MinValue; // For high-precision timing
         private bool loopPendingTransition = false;
         private float loopTransitionAccuracy = 0.02f; // 20ms accuracy for smoother looping (adjust dynamically)
         
@@ -310,103 +311,65 @@ namespace MusicBeePlugin
                     loopPendingTransition = false;
                 }
                 
-                // Get current playback position with high precision
-                float currentPosition = mbApiInterface.Player_GetPosition() / 1000f; // Convert ms to seconds
+                // Simple and robust approach: just get the current position directly
+                int rawPositionMs = mbApiInterface.Player_GetPosition();
+                float currentPosition = rawPositionMs / 1000.0f; // Convert ms to seconds
     
                 // Debug info occasionally, but not too often to avoid log spam
-                if (DateTime.Now.Second % 10 == 0 && DateTime.Now.Millisecond < 100)
+                if (DateTime.Now.Second % 5 == 0 && DateTime.Now.Millisecond < 100)
                 {
-                    mbApiInterface.MB_Trace($"Loop Monitor | Position: {currentPosition:F3}s | Loop: {currentLoopStart:F3}s-{currentLoopEnd:F3}s | Pending: {loopPendingTransition}");
+                    mbApiInterface.MB_Trace($"Loop Monitor | Position: {currentPosition:F3}s | Loop: {currentLoopStart:F3}s-{currentLoopEnd:F3}s");
                 }
                 
-                // The main loop state machine
-                if (loopPendingTransition)
-                {
-                    // We're already in transition mode, now check if we're very close to the precise loop point
-                    // This creates a tighter loop with less jitter
-                    
-                    // Calculate exact timing to prevent audio glitches
-                    float buffer = loopTransitionAccuracy; // Use our dynamic accuracy parameter
-                    
-                    if (currentPosition >= (currentLoopEnd - buffer))
-                    {
-                        if (crossfadeEnabled && crossfadeDuration > 0)
-                        {
-                            // Implement crossfade by creating a temporary file that combines the end and start
-                            string tempFilePath = Path.Combine(Path.GetTempPath(), $"loop_{Path.GetFileName(currentFile)}");
-                            
-                            Task.Run(() => {
-                                try
-                                {
-                                    CreateCrossfadeTransition(currentFile, tempFilePath, 
-                                                            currentLoopStart, currentLoopEnd, 
-                                                            crossfadeDuration / 1000.0f);
-                                                            
-                                    // Switch to the crossfaded file
-                                    mbApiInterface.MB_Trace($"Playing crossfade transition file: {tempFilePath}");
-                                    mbApiInterface.NowPlayingList_QueueNext(tempFilePath);
-                                    mbApiInterface.Player_PlayNextTrack();
-                                    
-                                    // When crossfade file finishes, we'll go back to normal looping
-                                }
-                                catch (Exception ex)
-                                {
-                                    mbApiInterface.MB_Trace($"Crossfade error: {ex.Message} - falling back to direct loop");
-                                    // Fall back to standard looping
-                                    mbApiInterface.Player_SetPosition((int)(currentLoopStart * 1000));
-                                }
-                            });
-                        }
-                        else
-                        {
-                            // Standard looping - jump back to loop start with precise timing
-                            int positionMs = (int)(currentLoopStart * 1000);
-                            mbApiInterface.MB_Trace($"LOOP EXECUTED: Jumping from {currentPosition:F3}s to {currentLoopStart:F3}s");
-                            mbApiInterface.Player_SetPosition(positionMs);
-                        }
-                        
-                        lastLoopTime = DateTime.Now;
-                        loopPendingTransition = false;
-                        
-                        // Visual feedback that looping occurred (temporary status message)
-                        mbApiInterface.MB_SetBackgroundTaskMessage(crossfadeEnabled ? "🎵 Crossfade loop activated" : "♻️ Seamless loop activated");
-                        Task.Run(() => {
-                            System.Threading.Thread.Sleep(800);
-                            mbApiInterface.MB_SetBackgroundTaskMessage("");
-                        });
-                    }
-                    else if (currentPosition < (currentLoopEnd - 0.5f))
-                    {
-                        // Something went wrong, we got too far away from the loop point
-                        // Cancel the pending transition
-                        mbApiInterface.MB_Trace($"WARNING: Loop transition canceled - position shifted unexpectedly to {currentPosition:F3}s");
-                        loopPendingTransition = false;
-                    }
-                }
-                else // Not in transition mode
+                // SIMPLIFIED LOOP LOGIC
+                // Check if we're past the loop end point (or very close to it)
+                if (currentPosition >= (currentLoopEnd - 0.05f)) // Within 50ms of end point
                 {
                     // Don't trigger more than once per half-second to avoid rapid jumping
                     if ((DateTime.Now - lastLoopTime).TotalSeconds < 0.5)
                         return;
+                        
+                    // Standard, direct looping - jump back to loop start
+                    int loopPositionMs = (int)(currentLoopStart * 1000);
+                    mbApiInterface.MB_Trace($"LOOP EXECUTED: Jumping from {currentPosition:F3}s to {currentLoopStart:F3}s");
                     
-                    // Check if we're approaching the loop end point - use a larger buffer for initial detection
-                    float approachBuffer = 0.5f; // Start preparing half a second before the end point
+                    // Execute the loop jump directly without delay
+                    mbApiInterface.Player_SetPosition(loopPositionMs);
                     
-                    if (currentPosition >= (currentLoopEnd - approachBuffer))
-                    {
-                        // We're approaching the loop end, enter transition mode for more precise timing
-                        loopPendingTransition = true;
-                        mbApiInterface.MB_Trace($"LOOP APPROACHING: At {currentPosition:F3}s, preparing to loop back from {currentLoopEnd:F3}s to {currentLoopStart:F3}s");
-                    }
-                }
-                
-                // Safety check - if we somehow got past the loop end (e.g., timer missed the window)
-                if (currentPosition > currentLoopEnd + 0.1f)
-                {
-                    mbApiInterface.MB_Trace($"SAFETY TRIGGERED: Position {currentPosition:F3}s is past loop end {currentLoopEnd:F3}s - correcting");
-                    mbApiInterface.Player_SetPosition((int)(currentLoopStart * 1000));
+                    // Set flag to avoid multiple loops in rapid succession
                     lastLoopTime = DateTime.Now;
                     loopPendingTransition = false;
+                    
+                    // Visual feedback
+                    mbApiInterface.MB_SetBackgroundTaskMessage("♻️ Loop activated");
+                    Task.Run(() => {
+                        System.Threading.Thread.Sleep(800);
+                        mbApiInterface.MB_SetBackgroundTaskMessage("");
+                    });
+                }
+                
+                // Enhanced safety check for when we miss the loop point completely
+                if (currentPosition > currentLoopEnd + 0.1f) // More generous threshold (100ms)
+                {
+                    // Don't trigger more than once per half-second to avoid rapid jumping
+                    if ((DateTime.Now - lastLoopTime).TotalSeconds < 0.5)
+                        return;
+                        
+                    mbApiInterface.MB_Trace($"SAFETY TRIGGERED: Position {currentPosition:F3}s is past loop end {currentLoopEnd:F3}s - correcting");
+                    
+                    // Simple direct approach - just go back to the loop start
+                    int safetyLoopMs = (int)(currentLoopStart * 1000);
+                    
+                    mbApiInterface.Player_SetPosition(safetyLoopMs);
+                    lastLoopTime = DateTime.Now;
+                    loopPendingTransition = false;
+                    
+                    // Visual feedback for safety loop
+                    mbApiInterface.MB_SetBackgroundTaskMessage("⚠️ Loop recovered");
+                    Task.Run(() => {
+                        System.Threading.Thread.Sleep(800);
+                        mbApiInterface.MB_SetBackgroundTaskMessage("");
+                    });
                 }
             }
             catch (Exception ex)
@@ -419,62 +382,182 @@ namespace MusicBeePlugin
 
         /// <summary>
         /// Create a crossfade transition file that smoothly blends the end of the loop with the start
+        /// using improved sample-accurate processing for smoother transitions
         /// </summary>
         private void CreateCrossfadeTransition(string sourceFile, string outputFile, float loopStart, float loopEnd, float crossfadeDuration)
         {
-            mbApiInterface.MB_Trace($"Creating crossfade transition from {loopEnd-crossfadeDuration:F3}s to {loopStart+crossfadeDuration:F3}s");
+            mbApiInterface.MB_Trace($"Creating enhanced crossfade transition from {loopEnd-crossfadeDuration:F3}s to {loopStart+crossfadeDuration:F3}s");
             
             using (var reader = new AudioFileReader(sourceFile))
             {
-                // Calculate positions in samples
-                int startSample = (int)(loopStart * reader.WaveFormat.SampleRate);
-                int endSample = (int)((loopEnd - crossfadeDuration) * reader.WaveFormat.SampleRate);
-                int crossfadeSamples = (int)(crossfadeDuration * reader.WaveFormat.SampleRate);
+                // Look for stored sample-accurate positions if available
+                int startSample = 0;
+                int endSample = 0;
+                int actualSampleRate = reader.WaveFormat.SampleRate;
+                
+                string startSampleStr = mbApiInterface.Library_GetFileTag(sourceFile, MetaDataType.Custom4);
+                string endSampleStr = mbApiInterface.Library_GetFileTag(sourceFile, MetaDataType.Custom5);
+                string sampleRateStr = mbApiInterface.Library_GetFileTag(sourceFile, MetaDataType.Custom6);
+                
+                // Use sample-accurate positions if available
+                if (!string.IsNullOrEmpty(startSampleStr) && !string.IsNullOrEmpty(endSampleStr) && 
+                    !string.IsNullOrEmpty(sampleRateStr))
+                {
+                    if (int.TryParse(startSampleStr, out startSample) &&
+                        int.TryParse(endSampleStr, out endSample) &&
+                        int.TryParse(sampleRateStr, out int storedSampleRate))
+                    {
+                        mbApiInterface.MB_Trace("Using sample-accurate positions for precise crossfade");
+                        
+                        // Adjust if stored sample rate doesn't match actual file
+                        if (storedSampleRate != actualSampleRate)
+                        {
+                            float ratio = (float)actualSampleRate / storedSampleRate;
+                            startSample = (int)(startSample * ratio);
+                            endSample = (int)(endSample * ratio);
+                        }
+                    }
+                    else
+                    {
+                        // Fall back to time-based positions if parsing fails
+                        startSample = (int)(loopStart * actualSampleRate);
+                        endSample = (int)(loopEnd * actualSampleRate);
+                    }
+                }
+                else
+                {
+                    // Use time-based positions if no sample positions stored
+                    startSample = (int)(loopStart * actualSampleRate);
+                    endSample = (int)(loopEnd * actualSampleRate);
+                }
+                
+                // Calculate crossfade parameters
+                int crossfadeSamples = (int)(crossfadeDuration * actualSampleRate);
+                int preCrossfadeEndSample = endSample - crossfadeSamples;
+                int channels = reader.WaveFormat.Channels;
                 
                 // Create the crossfade output file with the same format
                 using (var writer = new WaveFileWriter(outputFile, reader.WaveFormat))
                 {
-                    // Write the ending portion (just before the loop end)
-                    reader.Position = (long)endSample * reader.WaveFormat.BlockAlign;
-                    byte[] buffer = new byte[reader.WaveFormat.AverageBytesPerSecond];
-                    int bytesRead;
+                    // Read the ending portion into memory for better processing
+                    reader.Position = (long)preCrossfadeEndSample * reader.WaveFormat.BlockAlign;
+                    int endPortionSamples = crossfadeSamples * 2; // Include crossfade region + extra
+                    float[] endingPortion = new float[endPortionSamples * channels];
+                    int samplesRead = reader.Read(endingPortion, 0, endingPortion.Length);
                     
-                    while ((bytesRead = reader.Read(buffer, 0, buffer.Length)) > 0)
-                    {
-                        writer.Write(buffer, 0, bytesRead);
-                        
-                        // Stop when we've reached near the end of the file
-                        if (reader.CurrentTime.TotalSeconds >= loopEnd)
-                            break;
-                    }
-                    
-                    // Now write the beginning portion (from loop start) with crossfade
+                    // Read the beginning portion into memory
                     reader.Position = (long)startSample * reader.WaveFormat.BlockAlign;
+                    int beginPortionSamples = crossfadeSamples * 2; // Include crossfade region + extra
+                    float[] beginningPortion = new float[beginPortionSamples * channels];
+                    int beginSamplesRead = reader.Read(beginningPortion, 0, beginningPortion.Length);
                     
-                    // Read samples for crossfade (we need to mix them)
-                    float[] samples = new float[crossfadeSamples * reader.WaveFormat.Channels];
-                    reader.Read(samples, 0, samples.Length);
+                    // Calculate the optimal overlap alignment by finding the best matching point
+                    int bestOffset = 0;
+                    float bestCorrelation = float.MinValue;
                     
-                    // Apply fade-in to these samples
-                    for (int i = 0; i < samples.Length; i++)
+                    // Try different alignment offsets (±10% of crossfade length)
+                    int maxOffset = crossfadeSamples / 10 * channels;
+                    
+                    for (int offset = -maxOffset; offset <= maxOffset; offset += channels)
                     {
-                        float fadeInFactor = (float)i / samples.Length;
-                        samples[i] *= fadeInFactor;
+                        float correlation = 0;
+                        int correlationPoints = 0;
+                        
+                        // Compare a small portion of the audio (for performance)
+                        int compareSize = Math.Min(crossfadeSamples * channels / 4, 2000);
+                        
+                        for (int i = 0; i < compareSize; i += channels)
+                        {
+                            int endIdx = crossfadeSamples * channels + offset + i;
+                            int beginIdx = i;
+                            
+                            if (endIdx >= 0 && endIdx < samplesRead && beginIdx < beginSamplesRead)
+                            {
+                                for (int ch = 0; ch < channels; ch++)
+                                {
+                                    // Calculate correlation (product of samples)
+                                    correlation += endingPortion[endIdx + ch] * beginningPortion[beginIdx + ch];
+                                    correlationPoints++;
+                                }
+                            }
+                        }
+                        
+                        if (correlationPoints > 0)
+                        {
+                            correlation /= correlationPoints;
+                            if (correlation > bestCorrelation)
+                            {
+                                bestCorrelation = correlation;
+                                bestOffset = offset;
+                            }
+                        }
                     }
                     
-                    // Convert back to bytes and write
-                    byte[] fadeInBytes = new byte[samples.Length * sizeof(float)];
-                    Buffer.BlockCopy(samples, 0, fadeInBytes, 0, fadeInBytes.Length);
-                    writer.Write(fadeInBytes, 0, fadeInBytes.Length);
+                    mbApiInterface.MB_Trace($"Best crossfade alignment offset: {bestOffset} samples (correlation: {bestCorrelation:F4})");
                     
-                    // Continue writing the rest of the beginning portion
-                    while ((bytesRead = reader.Read(buffer, 0, buffer.Length)) > 0)
+                    // Write the first part of the ending portion (before crossfade)
+                    for (int i = 0; i < crossfadeSamples * channels; i++)
                     {
-                        writer.Write(buffer, 0, bytesRead);
+                        writer.WriteSample(endingPortion[i]);
+                    }
+                    
+                    // Create the crossfaded region with optimal alignment
+                    for (int i = 0; i < crossfadeSamples * channels; i++)
+                    {
+                        // Calculate fade factors with smooth curve (cubic)
+                        float progress = (float)i / (crossfadeSamples * channels);
+                        float fadeOutFactor = 1.0f - (progress * progress * (3 - 2 * progress)); // Smooth cubic curve
+                        float fadeInFactor = progress * progress * (3 - 2 * progress); // Smooth cubic curve
                         
-                        // Stop at a reasonable point
-                        if (reader.CurrentTime.TotalSeconds >= loopStart + 2.0f)
-                            break;
+                        // Apply crossfade with alignment offset
+                        int endIdx = crossfadeSamples * channels + i;
+                        int beginIdx = i + bestOffset;
+                        
+                        if (endIdx < samplesRead && beginIdx >= 0 && beginIdx < beginSamplesRead)
+                        {
+                            float blended = (endingPortion[endIdx] * fadeOutFactor) + 
+                                           (beginningPortion[beginIdx] * fadeInFactor);
+                            writer.WriteSample(blended);
+                        }
+                        else if (endIdx < samplesRead)
+                        {
+                            writer.WriteSample(endingPortion[endIdx] * fadeOutFactor);
+                        }
+                        else if (beginIdx >= 0 && beginIdx < beginSamplesRead)
+                        {
+                            writer.WriteSample(beginningPortion[beginIdx] * fadeInFactor);
+                        }
+                    }
+                    
+                    // Write the rest of the beginning portion after the crossfade
+                    int remainingSamples = beginSamplesRead - (crossfadeSamples * channels + bestOffset);
+                    if (remainingSamples > 0)
+                    {
+                        for (int i = 0; i < remainingSamples; i++)
+                        {
+                            int idx = crossfadeSamples * channels + bestOffset + i;
+                            if (idx >= 0 && idx < beginSamplesRead)
+                            {
+                                writer.WriteSample(beginningPortion[idx]);
+                            }
+                        }
+                    }
+                    
+                    // If we need more audio, read additional content from the file
+                    if (writer.Position < writer.WaveFormat.AverageBytesPerSecond * 2)
+                    {
+                        // Continue from where we left off
+                        byte[] buffer = new byte[reader.WaveFormat.AverageBytesPerSecond];
+                        int bytesRead;
+                        
+                        while ((bytesRead = reader.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            writer.Write(buffer, 0, bytesRead);
+                            
+                            // Stop at a reasonable point
+                            if (writer.Position >= writer.WaveFormat.AverageBytesPerSecond * 2)
+                                break;
+                        }
                     }
                 }
             }

@@ -25,23 +25,15 @@ namespace MusicBeePlugin
         }
         
         /// <summary>
-        /// Initialize plugin menu items
+        /// Initialize plugin menu items - simplified interface with only core options
         /// </summary>
         public void InitializeMenuItems()
         {
-            // Add menu items to Tools menu
+            // Add menu items to Tools menu - SIMPLIFIED with only 3 core options
             mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender", "OST Extender", null);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Analyze Track", "Find Loop Points", OnAnalyzeTrack);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Play with Loop", "Enable Smart Looping", OnSmartLoop);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Create Extended Version", "Extend OST (A+B×5)", OnExtendTrack);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Toggle Loop", "Toggle Smart Loop On/Off", OnToggleSmartLoop);
-            
-            // Advanced settings submenu
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Settings", "Settings...", null);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Settings/Toggle Crossfade", "Crossfade Between Loop Points", OnToggleCrossfade);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Settings/Toggle Precise Looping", "Precise Sample-Accurate Looping", OnTogglePreciseLooping);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Settings/Set Crossfade Duration", "Set Crossfade Duration...", OnSetCrossfadeDuration);
-            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Settings/Re-analyze All OSTs", "Re-analyze All OSTs in Library...", OnReanalyzeAll);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Analyze Track", "Analyze Track", OnAnalyzeTrack);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Toggle OST Loop", "Toggle OST Loop", OnToggleSmartLoop);
+            mbApiInterface.MB_AddMenuItem("mnuTools/OST Extender/Play OST Loop", "Play OST Loop", OnSmartLoop);
 
             // Add to multiple context menus to ensure it appears on right-click
             string[] contextMenus = new[] {
@@ -55,9 +47,9 @@ namespace MusicBeePlugin
             foreach (string menuPath in contextMenus)
             {
                 mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender", "OST Extender", null);
-                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Analyze Track", "Find Loop Points", OnAnalyzeTrack);
-                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Play with Loop", "Enable Smart Looping", OnSmartLoop);
-                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Create Extended Version", "Extend OST", OnExtendTrack);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Analyze Track", "Analyze Track", OnAnalyzeTrack);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Toggle OST Loop", "Toggle OST Loop", OnToggleSmartLoop);
+                mbApiInterface.MB_AddMenuItem($"{menuPath}/OST Extender/Play OST Loop", "Play OST Loop", OnSmartLoop);
             }
         }
         
