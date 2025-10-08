@@ -22,6 +22,9 @@ namespace MusicBeePlugin
 {
     public partial class Plugin
     {
+
+
+
         // Required so the template's entry point can be called
         static private YourNamespace.LibraryEntryPoint entryPoint = new YourNamespace.LibraryEntryPoint();
 
@@ -36,18 +39,22 @@ namespace MusicBeePlugin
 
         public PluginInfo Initialise(IntPtr apiInterfacePtr)
         {
+        try
+        {
+            // Initialize the API interface first
+            mbApiInterface = new MusicBeeApiInterface();
+            mbApiInterface.Initialise(apiInterfacePtr);
+
             // Read plugin info from the .csproj file
             Assembly thisAssem = typeof(Plugin).Assembly;
-            about.Name = thisAssem.GetCustomAttribute<AssemblyTitleAttribute>().Title;
-            about.Description = thisAssem.GetCustomAttribute<AssemblyDescriptionAttribute>().Description;
-            about.Author = thisAssem.GetCustomAttribute<AssemblyCompanyAttribute>().Company;
+            about.Name = thisAssem.GetCustomAttribute<AssemblyTitleAttribute>()?.Title ?? "Smart Loop Plugin";
+            about.Description = thisAssem.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description ?? "Intelligent audio loop detection";
+            about.Author = thisAssem.GetCustomAttribute<AssemblyCompanyAttribute>()?.Company ?? "Unknown";
             Version ver = thisAssem.GetName().Version;
             about.VersionMajor = (short)ver.Major;
             about.VersionMinor = (short)ver.Minor;
             about.Revision = (short)ver.Revision;
             
-            mbApiInterface = new MusicBeeApiInterface();
-            mbApiInterface.Initialise(apiInterfacePtr);
             about.PluginInfoVersion = PluginInfoVersion;
             about.Type = PluginType.General;
             about.TargetApplication = "";
@@ -57,7 +64,7 @@ namespace MusicBeePlugin
             about.ConfigurationPanelHeight = 0;
 
             // Add our "Activate Smart Loop" option to the right-click context menu.
-            mbApiInterface.MB_AddMenuItem("CONTEXT/Activate Smart Loop", null, ActivateSmartLoop_Clicked);
+            mbApiInterface.MB_AddMenuItem("context.Main/Activate Smart Loop", null, ActivateSmartLoop_Clicked);
 
             // Setup and start the timer.
             playbackTimer.Interval = 200; // Check 5 times per second
@@ -66,14 +73,31 @@ namespace MusicBeePlugin
 
             return about;
         }
+        catch (Exception ex)
+        {
+            // Log the actual error for debugging
+            MessageBox.Show($"Plugin initialization failed:\n{ex.Message}\n\nStack Trace:\n{ex.StackTrace}", 
+                        "Plugin Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            
+            // Return a minimal about structure to prevent complete failure
+            about.Name = "Smart Loop Plugin (Error)";
+            about.Type = PluginType.General;
+            return about;
+        }
+        }
 
         private void ActivateSmartLoop_Clicked(object sender, EventArgs e)
         {
             // THIS IS THE CORRECTED CODE TO GET THE SELECTED FILE
             string[] selectedFiles = new string[0];
-            mbApiInterface.NowPlayingList_QueryFilesEx("domain=SelectedFiles", out selectedFiles);
+            mbApiInterface.Library_QueryFilesEx("domain=SelectedFiles", out selectedFiles);
 
-            if (selectedFiles.Length == 0) return; // No file was selected
+            if (selectedFiles.Length == 0)
+            {
+                MessageBox.Show("Please select a track first.", "No Track Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             string selectedFile = selectedFiles[0]; // Get the first selected file
 
             mbApiInterface.MB_SetBackgroundTaskMessage("Smart Looper: Analyzing track...");
