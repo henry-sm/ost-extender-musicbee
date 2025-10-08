@@ -164,100 +164,147 @@ namespace MusicBeePlugin
 
         private void PlaybackTimer_Tick(object sender, EventArgs e)
         {
-            // Skip this tick if we're still in the cooldown period
+            // Skip cooldown ticks
             if (skipNextTicks > 0)
             {
                 skipNextTicks--;
                 return;
             }
 
+            // Check if playing
             if (mbApiInterface.Player_GetPlayState() != PlayState.Playing) return;
 
-            // Get the current file without normalization - use exactly what MusicBee gives us
             string currentFile = mbApiInterface.NowPlaying_GetFileUrl();
+            if (string.IsNullOrEmpty(currentFile)) return;
             
-            // Check both normalized and exact paths
+            // Try to find loop points for this track
             bool hasLoop = false;
             (double loopStart, double loopEnd) = (0, 0);
             
-            if (!string.IsNullOrEmpty(currentFile))
+            // Try exact match first
+            if (trackLoopPoints.ContainsKey(currentFile))
             {
-                if (trackLoopPoints.ContainsKey(currentFile))
+                hasLoop = true;
+                loopStart = trackLoopPoints[currentFile].start;
+                loopEnd = trackLoopPoints[currentFile].end;
+            }
+            else
+            {
+                // Try normalized path
+                try
                 {
-                    hasLoop = true;
-                    loopStart = trackLoopPoints[currentFile].start;
-                    loopEnd = trackLoopPoints[currentFile].end;
-                }
-                else
-                {
-                    try
+                    string normalizedPath = Path.GetFullPath(currentFile).ToLowerInvariant();
+                    if (trackLoopPoints.ContainsKey(normalizedPath))
                     {
-                        string normalizedPath = Path.GetFullPath(currentFile).ToLowerInvariant();
-                        if (trackLoopPoints.ContainsKey(normalizedPath))
-                        {
-                            hasLoop = true;
-                            loopStart = trackLoopPoints[normalizedPath].start;
-                            loopEnd = trackLoopPoints[normalizedPath].end;
-                        }
+                        hasLoop = true;
+                        loopStart = trackLoopPoints[normalizedPath].start;
+                        loopEnd = trackLoopPoints[normalizedPath].end;
                     }
-                    catch { /* ignore normalization errors */ }
                 }
+                catch { /* ignore normalization errors */ }
             }
 
-            // If we have a loop for this track, check if we need to jump
-            if (hasLoop)
+            if (!hasLoop) return;
+
+            // Get current position and check if we need to loop
+            double position = mbApiInterface.Player_GetPosition() / 1000.0;
+            double duration = mbApiInterface.NowPlaying_GetDuration() / 1000.0;
+            
+            // *** PREDICTIVE APPROACH: Look ahead to compensate for position lag ***
+            // Calculate playback rate (how fast position is changing)
+            double elapsedTime = (DateTime.Now - lastCheckTime).TotalSeconds;
+            double positionDelta = position - lastPosition;
+            
+            // Store current values for next calculation
+            lastPosition = position;
+            lastCheckTime = DateTime.Now;
+            
+            // Only calculate rate if we have meaningful values
+            double playbackRate = 1.0; // Default to 1x speed
+            if (elapsedTime > 0 && Math.Abs(positionDelta) > 0.001)
             {
-                double currentPositionSec = mbApiInterface.Player_GetPosition() / 1000.0;
-                double trackDuration = mbApiInterface.NowPlaying_GetDuration() / 1000.0;
+                playbackRate = positionDelta / elapsedTime;
                 
-                // Calculate how close we are to the end as a percentage
-                double percentToEnd = (loopEnd > 0) ? ((currentPositionSec - loopStart) / (loopEnd - loopStart)) * 100 : 0;
-                
-                // Start checking much earlier - at 95% of the loop duration
-                // This compensates for position reporting lag
-                bool shouldJump = (currentPositionSec >= loopEnd - 0.25) || (percentToEnd >= 95);
-                
-                // Additional safety check: if we're near track end
-                bool nearTrackEnd = (trackDuration > 0 && currentPositionSec >= trackDuration - 0.5);
-                
-                if (shouldJump || nearTrackEnd)
+                // Sanity check - playback rate should be close to 1.0
+                if (playbackRate > 0.5 && playbackRate < 1.5)
                 {
-                    // Perform the jump with the pause/resume trick for maximum reliability
-                    try
-                    {
-                        // Try the pause/play trick that often works better
-                        PlayState originalState = mbApiInterface.Player_GetPlayState();
-                        mbApiInterface.Player_PlayPause(); // Pause
-                        
-                        // Add a small sleep to ensure the pause takes effect
-                        Thread.Sleep(20);
-                        
-                        mbApiInterface.Player_SetPosition((int)(loopStart * 1000)); // Set position while paused
-                        
-                        // Another small sleep to ensure position is set
-                        Thread.Sleep(20);
-                        
-                        if (originalState == PlayState.Playing)
-                        {
-                            mbApiInterface.Player_PlayPause(); // Resume if it was playing
-                        }
-                        
-                        // Log for debugging
-                        File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
-                            $"{DateTime.Now}: Loop jump from {currentPositionSec:F2}s ({percentToEnd:F1}%) to {loopStart:F2}s using pause/resume trick\n");
-                            
-                        // Skip a few ticks to avoid multiple jumps
-                        skipNextTicks = 5;
-                    }
-                    catch (Exception ex)
-                    {
-                        // Log error
-                        File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
-                            $"{DateTime.Now}: ERROR during loop: {ex.Message}\n");
-                    }
+                    // Use an exponential moving average to smooth the rate
+                    smoothedPlaybackRate = (smoothedPlaybackRate * 0.7) + (playbackRate * 0.3);
                 }
             }
-        }        
+            
+            // Predict where playback will be in the next 100ms
+            double predictedPosition = position + (smoothedPlaybackRate * 0.1);
+            
+            // Log occasionally for debugging
+            if (DateTime.Now.Second % 5 == 0 && DateTime.Now.Millisecond < 200)
+            {
+                File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                    $"{DateTime.Now}: Position={position:F2}s, Predicted={predictedPosition:F2}s, End={loopEnd:F2}s, Rate={smoothedPlaybackRate:F3}x\n");
+            }
+            
+            // Check if current OR predicted position is past the loop point
+            // This catches both the case where we're already past it AND the case where we'll be past it soon
+            if (position >= loopEnd - 0.2 || predictedPosition >= loopEnd)
+            {
+                // Log the loop attempt
+                File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                    $"{DateTime.Now}: ATTEMPTING LOOP from {position:F2}s (predicted {predictedPosition:F2}s) to {loopStart:F2}s\n");
+                
+                try
+                {
+                    // Two-step approach: pause, then reset position
+                    mbApiInterface.Player_PlayPause(); // Pause
+                    Thread.Sleep(20);
+                    mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
+                    Thread.Sleep(20);
+                    mbApiInterface.Player_PlayPause(); // Resume
+                    
+                    // Reset our predictive variables after a jump
+                    lastPosition = loopStart;
+                    lastCheckTime = DateTime.Now;
+                    
+                    File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                        $"{DateTime.Now}: Used PAUSE-REPOSITION-PLAY method\n");
+                }
+                catch (Exception ex)
+                {
+                    File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                        $"{DateTime.Now}: ERROR: {ex.Message}\n");
+                    
+                    // If the two-step approach fails, try the full reload method
+                    try
+                    {
+                        // Get current track in playlist
+                        int currentIndex = mbApiInterface.NowPlayingList_GetCurrentIndex();
+                        
+                        mbApiInterface.Player_Stop();
+                        Thread.Sleep(50);
+                        mbApiInterface.NowPlayingList_PlayNow(currentIndex.ToString());
+                        Thread.Sleep(100);
+                        mbApiInterface.Player_SetPosition((int)(loopStart * 1000));
+                        mbApiInterface.Player_PlayPause();
+                        
+                        File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                            $"{DateTime.Now}: Used TRACK RELOAD METHOD as fallback\n");
+                    }
+                    catch (Exception ex2)
+                    {
+                        File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SmartLoop.log"), 
+                            $"{DateTime.Now}: FALLBACK ERROR: {ex2.Message}\n");
+                    }
+                }
+                
+                // Skip several ticks to avoid multiple attempts
+                skipNextTicks = 20;
+            }
+        }
+
+// Add these fields to your class
+private DateTime lastCheckTime = DateTime.Now;
+private double lastPosition = 0;
+private double smoothedPlaybackRate = 1.0;
+
 
         // Add this field to your class
         private int skipNextTicks = 0;
@@ -282,7 +329,7 @@ namespace MusicBeePlugin
                     }
                     break;
                     
-                case NotificationType.NowPlayingListChanged:
+                case NotificationType.PlayingTracksChanged:
                 case NotificationType.TrackChanged:
                     // Track changed, check if the new track has loop points
                     string nowPlayingFile = mbApiInterface.NowPlaying_GetFileUrl();
