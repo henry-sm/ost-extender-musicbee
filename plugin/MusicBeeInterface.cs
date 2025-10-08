@@ -10,8 +10,8 @@ namespace MusicBeePlugin
         public const short MinInterfaceVersion = 41;
         public const short MinApiRevision = 53;
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MusicBeeApiInterface
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MusicBeeApiInterface
         {
             public void Initialise(IntPtr apiInterfacePtr)
             {

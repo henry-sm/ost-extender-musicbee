@@ -1,3 +1,0 @@
-@echo off
-echo Installing OST Extender Plugin for MusicBee...
-powershell -ExecutionPolicy Bypass -File "%~dp0InstallPlugin.ps1"
