@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Version>1.0.0</Version>    <!-- This is the version of the plugin AND DLL -->
+    <Version>1.0.1</Version>    <!-- This is the version of the plugin AND DLL -->
     <AssemblyName>mb_OST_Extender</AssemblyName>    <!-- This is the name of the DLL file -->
     <AssemblyTitle>OST Extender</AssemblyTitle>    <!-- This is the title of the plugin AND DLL -->
     <Company>Henry</Company>    <!-- This is the name of the author -->
